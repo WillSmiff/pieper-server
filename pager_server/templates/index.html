@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Pager</h1>
+    <form method="post" action="/logout">
+      <span class="muted">Signed in as <strong>{{ user }}</strong></span>
+      <button type="submit" class="link">Sign out</button>
+    </form>
+  </header>
+
+  <main>
+    <section class="card">
+      <form id="compose">
+        <label for="text">Message</label>
+        <textarea id="text" maxlength="{{ max_len }}" rows="4"
+                  placeholder="Type a page… (Ctrl+Enter to send)" required></textarea>
+        <div class="row">
+          <span id="counter" class="muted">0 / {{ max_len }}</span>
+          <button type="submit" id="send">Send to all pagers</button>
+        </div>
+        <p id="feedback" role="status"></p>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Devices <span id="online-summary" class="muted"></span></h2>
+      <ul id="devices" class="devices"><li class="muted">Loading…</li></ul>
+    </section>
+
+    <section class="card">
+      <h2>Recent pages</h2>
+      <ul id="messages" class="messages"><li class="muted">Loading…</li></ul>
+    </section>
+  </main>
+
+  <script>window.MAX_LEN = {{ max_len }};</script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
