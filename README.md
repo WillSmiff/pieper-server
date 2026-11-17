@@ -57,6 +57,9 @@ python tools/fake_device.py ws://localhost:8000/ws/device <token>
 
 ## Deploying with HTTPS
 
+Ready-made files for an Ubuntu VPS are in [`deploy/`](deploy/): a systemd unit
+(`pager.service`, code in `/opt/pager`, data in `/var/lib/pager`) and a `Caddyfile`.
+
 Put a reverse proxy such as Caddy in front of the server. It handles TLS certificates
 automatically and forwards WebSockets without extra configuration:
 

@@ -1,0 +1,34 @@
+# systemd unit for the pager server.
+# Install: sudo cp deploy/pager.service /etc/systemd/system/ && sudo systemctl enable --now pager
+[Unit]
+Description=Pager server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pager
+Group=pager
+WorkingDirectory=/opt/pager
+Environment=PAGER_DATA_DIR=/var/lib/pager
+Environment=PAGER_COOKIE_SECURE=1
+# Only listen locally; Caddy terminates TLS and forwards to this port.
+# --proxy-headers makes the real client IP visible (used for login throttling).
+ExecStart=/opt/pager/.venv/bin/uvicorn pager_server.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pager
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

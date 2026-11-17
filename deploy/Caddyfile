@@ -1,0 +1,6 @@
+# Replace pager.example.com with your own domain (its DNS A record must point at the VPS).
+# Install: sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+pager.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8000
+}
