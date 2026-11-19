@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details TEXT,
     ip      TEXT
 );
+-- Monotonic counters that must survive deletions (e.g. page ids: pagers ignore
+-- ids they have already seen, so ids must never be reused after a wipe/purge).
+CREATE TABLE IF NOT EXISTS counters (
+    name  TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
 """
 
 # Columns added after the first release; added to existing databases on startup.
@@ -221,6 +227,18 @@ def list_users():
         ).fetchall()
 
 
+def rename_user(old: str, new: str) -> bool:
+    """Change a username. Sessions stay valid (they refer to the user id).
+
+    Raises sqlite3.IntegrityError if the new name is taken (case-insensitive).
+    Past pages and audit entries keep the name used at the time.
+    """
+    with connect() as conn:
+        return conn.execute(
+            "UPDATE users SET username = ? WHERE username = ?", (new, old)
+        ).rowcount > 0
+
+
 def admin_count() -> int:
     with connect() as conn:
         return conn.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0]
@@ -310,6 +328,7 @@ def purge_expired(retention_days: int) -> tuple[int, int]:
         )
         pages = 0
         if retention_days > 0:
+            _remember_highest_message_id(conn)
             pages = conn.execute(
                 "DELETE FROM messages WHERE created_at < ?", (now(-retention_days * 86400),)
             ).rowcount
@@ -367,11 +386,34 @@ def list_devices():
 def add_message(sender: str, body: str) -> dict:
     created = now()
     with connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO messages (sender, body, created_at) VALUES (?, ?, ?)",
-            (sender, body, created),
+        # Next id = 1 + highest id ever issued, even if those pages were deleted since.
+        last = conn.execute("SELECT value FROM counters WHERE name = 'message_id'").fetchone()
+        highest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+        new_id = max(last["value"] if last else 0, highest) + 1
+        conn.execute(
+            "INSERT INTO messages (id, sender, body, created_at) VALUES (?, ?, ?, ?)",
+            (new_id, sender, body, created),
         )
-        return {"id": cur.lastrowid, "sender": sender, "body": body, "created_at": created}
+        conn.execute(
+            "INSERT INTO counters (name, value) VALUES ('message_id', ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (new_id,),
+        )
+        return {"id": new_id, "sender": sender, "body": body, "created_at": created}
+
+
+def wipe_messages() -> int:
+    """Delete the whole page history (acks cascade). Page ids keep counting up."""
+    with connect() as conn:
+        _remember_highest_message_id(conn)
+        return conn.execute("DELETE FROM messages").rowcount
+
+
+def _remember_highest_message_id(conn) -> None:
+    conn.execute(
+        "INSERT INTO counters (name, value) SELECT 'message_id', COALESCE(MAX(id), 0) FROM messages "
+        "WHERE true ON CONFLICT(name) DO UPDATE SET value = MAX(value, excluded.value)"
+    )
 
 
 def recent_messages(limit: int = 25):

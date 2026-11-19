@@ -148,11 +148,19 @@
       tr.append(el("td", null, u.sessions));
       tr.append(el("td", "muted", fmtTime(u.created_at)));
       const actions = el("td", "actions");
+      const path = `/api/admin/users/${enc(u.username)}`;
+      actions.append(button("Rename", "secondary", () => {
+        const next = prompt(`New username for ${u.username} (letters, digits, . - _ only):`, u.username);
+        if (next === null || next.trim() === u.username) return;
+        act(null, async () => {
+          const r = await api("POST", `${path}/rename`, { new_username: next.trim() });
+          return `${u.username} is now called ${r.username}. They sign in with the new name.`;
+        });
+      }));
       if (self) {
         actions.append(el("a", null, "Account page"));
         actions.lastChild.href = "/account";
       } else {
-        const path = `/api/admin/users/${enc(u.username)}`;
         actions.append(button("Reset password", "secondary", () => act(
           `Reset the password of ${u.username}? They will be signed out and need the new temporary password.`,
           async () => {
@@ -256,6 +264,13 @@
       return tr;
     }), "No pages sent yet.", 5);
   }
+
+  $("wipe-history").onclick = () => act(
+    "Delete the entire page history? This cannot be undone. Pagers keep the pages they already received.",
+    async () => {
+      const r = await api("DELETE", "/api/admin/messages");
+      return `Deleted ${r.deleted} page(s) from the history.`;
+    });
 
   async function loadAll() {
     try {

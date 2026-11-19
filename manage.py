@@ -10,6 +10,8 @@ create the first admin, or to get back in when no admin can sign in.
     python manage.py reset-2fa alice           # remove 2FA (lost phone); ends sessions
     python manage.py logout alice              # end all of alice's web sessions
     python manage.py del-user alice
+    python manage.py rename-user alice alicia  # sessions stay valid; sign in with the new name
+    python manage.py wipe-history              # delete all pages (page ids keep counting up)
     python manage.py users
     python manage.py add-device pager-01       # prints the device token once
     python manage.py rotate-device pager-01    # issue a new token (restart the server to drop
@@ -62,6 +64,10 @@ def main() -> int:
     add.add_argument("--admin", action="store_true", help="give the user admin rights")
     for cmd in ("passwd", "del-user", "logout", "make-admin", "revoke-admin", "reset-2fa"):
         sub.add_parser(cmd).add_argument("username")
+    ren = sub.add_parser("rename-user")
+    ren.add_argument("username")
+    ren.add_argument("new_username")
+    sub.add_parser("wipe-history")
     sub.add_parser("users")
     for cmd in ("add-device", "rotate-device", "del-device"):
         sub.add_parser(cmd).add_argument("name")
@@ -75,7 +81,8 @@ def main() -> int:
         db.audit("cli", action, target, details)
 
     name = getattr(args, "username", None) or getattr(args, "name", None)
-    if args.cmd in ("passwd", "del-user", "logout", "make-admin", "revoke-admin", "reset-2fa"):
+    if args.cmd in ("passwd", "del-user", "logout", "make-admin", "revoke-admin", "reset-2fa",
+                    "rename-user"):
         user = db.get_user(name)
         if user is None:
             return fail(f"No such user '{name}'.")
@@ -121,6 +128,22 @@ def main() -> int:
             return fail(str(exc))
         audit("user_deleted", name)
         print(f"Deleted user '{name}'.")
+    elif args.cmd == "rename-user":
+        new = args.new_username
+        if not valid_name(new):
+            return fail("Use 1-32 letters, digits, dots, dashes or underscores.")
+        try:
+            db.rename_user(name, new)
+        except sqlite3.IntegrityError:
+            return fail(f"User '{new}' already exists.")
+        audit("user_renamed", name, f"new name: {new}")
+        print(f"Renamed '{name}' to '{new}'.")
+    elif args.cmd == "wipe-history":
+        if input("Delete the entire page history? Type 'yes' to confirm: ").strip() != "yes":
+            return fail("Cancelled.")
+        n = db.wipe_messages()
+        audit("history_wiped", None, f"{n} page(s)")
+        print(f"Deleted {n} page(s).")
     elif args.cmd == "users":
         for u in db.list_users():
             role = "admin" if u["is_admin"] else "user"

@@ -29,6 +29,10 @@ class RoleIn(BaseModel):
     is_admin: bool
 
 
+class RenameIn(BaseModel):
+    new_username: str
+
+
 class NewDevice(BaseModel):
     name: str
 
@@ -103,6 +107,26 @@ async def set_role(username: str, body: RoleIn, request: Request,
         raise HTTPException(status_code=400, detail=str(exc))
     _audit(request, ctx, "admin_granted" if body.is_admin else "admin_revoked", user["username"])
     return {"ok": True}
+
+
+@router.post("/api/admin/users/{username}/rename")
+async def rename_user(username: str, body: RenameIn, request: Request,
+                      ctx: Ctx = Depends(require_recent_auth)):
+    # Renaming yourself is allowed: it changes nothing about your rights or sessions.
+    user = db.get_user(username)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user")
+    new = body.new_username.strip()
+    if not valid_name(new):
+        raise HTTPException(status_code=400, detail=NAME_RULES)
+    if new == user["username"]:
+        raise HTTPException(status_code=400, detail="That is already the username")
+    try:
+        db.rename_user(user["username"], new)
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="That username already exists")
+    _audit(request, ctx, "user_renamed", user["username"], f"new name: {new}")
+    return {"username": new}
 
 
 @router.post("/api/admin/users/{username}/reset-2fa")
@@ -187,6 +211,13 @@ async def delete_device(name: str, request: Request, ctx: Ctx = Depends(require_
 @router.get("/api/admin/messages")
 async def message_history(limit: int = 200, ctx: Ctx = Depends(require_admin)):
     return {"messages": [dict(m) for m in db.recent_messages(max(1, min(limit, 500)))]}
+
+
+@router.delete("/api/admin/messages")
+async def wipe_history(request: Request, ctx: Ctx = Depends(require_recent_auth)):
+    n = db.wipe_messages()
+    _audit(request, ctx, "history_wiped", None, f"{n} page(s)")
+    return {"deleted": n}
 
 
 @router.get("/api/admin/audit")

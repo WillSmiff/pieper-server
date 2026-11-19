@@ -38,6 +38,7 @@ At first sign-in, alice has to set up two-factor authentication before she can d
 ```bash
 python manage.py make-admin alice | revoke-admin alice
 python manage.py passwd alice | reset-2fa alice | logout alice | del-user alice
+python manage.py rename-user alice alicia | wipe-history
 python manage.py add-device pager-01 | rotate-device pager-01 | del-device pager-01
 python manage.py users | devices
 ```
@@ -81,10 +82,10 @@ Admins see an **Admin** link in the header. The backoffice covers what used to n
 
 | Area | Actions |
 |---|---|
-| Users | Add a user (they get a one-time temporary password), reset a password, make or remove admin, reset 2FA (lost phone), sign a user out everywhere, delete |
+| Users | Add a user (they get a one-time temporary password), rename, reset a forgotten password to a new temporary one, make or remove admin, reset 2FA (lost phone), sign a user out everywhere, delete |
 | Devices | Add a device or issue a new token (both shown once), delete. Revoked devices are disconnected immediately |
 | Audit log | Who did what and when: logins, failed 2FA codes, password and 2FA changes, and all admin actions |
-| Page history | The last 200 pages with delivery counts |
+| Page history | The last 200 pages with delivery counts; wipe the whole history. Page numbers keep counting up afterwards, so pagers don't mistake new pages for ones they've seen |
 
 Security rules:
 
