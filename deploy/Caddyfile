@@ -14,7 +14,7 @@ piepertje.nl {
 		# Only load scripts/styles from this site; never allow framing (clickjacking).
 		Content-Security-Policy "default-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
-		Referrer-Policy "no-referrer"
+		Referrer-Policy "same-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		# Don't advertise server software.
 		-Server

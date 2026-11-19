@@ -71,18 +71,25 @@ app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 app.include_router(admin.router)
 
 
+def _same_site_request(request: Request) -> bool:
+    # Modern browsers always send Sec-Fetch-Site; trust it first. (The Origin header can
+    # legitimately be "null" on same-site form posts, depending on the Referrer-Policy.)
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None:
+        return fetch_site in ("same-origin", "none")
+    # Older browsers / non-browser clients: if an Origin is given, it must be this host.
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True  # not a browser cross-site request (those always carry one of the headers)
+    return urlsplit(origin).netloc == request.headers.get("host", "")
+
+
 @app.middleware("http")
 async def origin_check_and_no_store(request: Request, call_next):
     # Defence in depth against cross-site requests, on top of the SameSite=strict cookie:
     # state-changing requests must come from this site's own pages.
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        origin = request.headers.get("origin")
-        fetch_site = request.headers.get("sec-fetch-site")
-        host = request.headers.get("host", "")
-        if (origin is not None and urlsplit(origin).netloc != host) or fetch_site not in (
-            None, "same-origin", "none"
-        ):
-            return JSONResponse({"error": "Cross-site request blocked"}, status_code=403)
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_site_request(request):
+        return JSONResponse({"error": "Cross-site request blocked"}, status_code=403)
     response = await call_next(request)
     if not request.url.path.startswith("/static/"):
         # Pages can contain one-time secrets (tokens, temporary passwords): never cache.
