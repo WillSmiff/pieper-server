@@ -1,4 +1,4 @@
-"""SQLite storage for users, devices, messages and delivery acknowledgements."""
+"""SQLite storage: users, sessions, devices, messages, acknowledgements, audit log."""
 
 import sqlite3
 from contextlib import contextmanager
@@ -9,10 +9,14 @@ from .security import hash_password, hash_token, new_device_token, new_session_t
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    password_hash TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    id                   INTEGER PRIMARY KEY,
+    username             TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash        TEXT NOT NULL,
+    created_at           TEXT NOT NULL,
+    is_admin             INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    totp_secret          TEXT,
+    totp_last_step       INTEGER
 );
 CREATE TABLE IF NOT EXISTS devices (
     id         INTEGER PRIMARY KEY,
@@ -28,10 +32,12 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    token_hash   TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    auth_at      TEXT,
+    totp_pending TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS acks (
@@ -40,7 +46,33 @@ CREATE TABLE IF NOT EXISTS acks (
     acked_at   TEXT NOT NULL,
     PRIMARY KEY (message_id, device_id)
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+    id      INTEGER PRIMARY KEY,
+    ts      TEXT NOT NULL,
+    actor   TEXT NOT NULL,
+    action  TEXT NOT NULL,
+    target  TEXT,
+    details TEXT,
+    ip      TEXT
+);
 """
+
+# Columns added after the first release; added to existing databases on startup.
+MIGRATIONS = {
+    "users": [
+        ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
+        ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        ("totp_secret", "TEXT"),
+        ("totp_last_step", "INTEGER"),
+    ],
+    "sessions": [("auth_at", "TEXT"), ("totp_pending", "TEXT")],
+}
+
+AUDIT_RETENTION_DAYS = 365
+
+
+class LastAdminError(Exception):
+    """Raised when an action would leave the system without any admin."""
 
 
 def now(offset_seconds: float = 0) -> str:
@@ -65,24 +97,65 @@ def init() -> None:
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        for table, columns in MIGRATIONS.items():
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns:
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 # ---------------------------------------------------------------- users
 
-def add_user(username: str, password: str) -> None:
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-            (username, hash_password(password), now()),
-        )
-
-
-def set_password(username: str, password: str) -> bool:
-    """Change a password and end all of that user's existing sessions."""
+def add_user(username: str, password: str, is_admin: bool = False, must_change: bool = False) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "UPDATE users SET password_hash = ? WHERE username = ?",
-            (hash_password(password), username),
+            "INSERT INTO users (username, password_hash, created_at, is_admin, must_change_password) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (username, hash_password(password), now(), int(is_admin), int(must_change)),
+        )
+        return cur.lastrowid
+
+
+def set_password(username: str, password: str, must_change: bool = False,
+                 keep_session: str | None = None) -> bool:
+    """Change a password and end the user's sessions (except `keep_session`, if given)."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = ? WHERE username = ?",
+            (hash_password(password), int(must_change), username),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?) "
+            "AND token_hash != ?",
+            (username, hash_token(keep_session) if keep_session else ""),
+        )
+        return cur.rowcount > 0
+
+
+def _ensure_other_admin(conn, username: str) -> None:
+    target = conn.execute("SELECT is_admin FROM users WHERE username = ?", (username,)).fetchone()
+    if not (target and target["is_admin"]):
+        return
+    others = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND username != ?", (username,)
+    ).fetchone()[0]
+    if others == 0:
+        raise LastAdminError("This is the last admin account")
+
+
+def delete_user(username: str) -> bool:
+    with connect() as conn:
+        _ensure_other_admin(conn, username)
+        return conn.execute("DELETE FROM users WHERE username = ?", (username,)).rowcount > 0
+
+
+def set_admin(username: str, is_admin: bool) -> bool:
+    """Grant or revoke admin. Ends the user's sessions so the change applies at next login."""
+    with connect() as conn:
+        if not is_admin:
+            _ensure_other_admin(conn, username)
+        cur = conn.execute(
+            "UPDATE users SET is_admin = ? WHERE username = ?", (int(is_admin), username)
         )
         conn.execute(
             "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
@@ -91,9 +164,37 @@ def set_password(username: str, password: str) -> bool:
         return cur.rowcount > 0
 
 
-def delete_user(username: str) -> bool:
+def set_totp(user_id: int, secret: str | None, used_step: int | None = None) -> None:
+    """Enable (secret) or disable (None) two-factor authentication for a user."""
     with connect() as conn:
-        return conn.execute("DELETE FROM users WHERE username = ?", (username,)).rowcount > 0
+        conn.execute(
+            "UPDATE users SET totp_secret = ?, totp_last_step = ? WHERE id = ?",
+            (secret, used_step, user_id),
+        )
+
+
+def reset_totp(username: str) -> bool:
+    """Admin action: remove 2FA and end sessions; the user sets it up again if required."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET totp_secret = NULL, totp_last_step = NULL WHERE username = ?",
+            (username,),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
+            (username,),
+        )
+        return cur.rowcount > 0
+
+
+def use_totp_step(user_id: int, step: int) -> bool:
+    """Atomically mark a TOTP time step as used; False if it (or a later one) was used already."""
+    with connect() as conn:
+        return conn.execute(
+            "UPDATE users SET totp_last_step = ? WHERE id = ? "
+            "AND (totp_last_step IS NULL OR totp_last_step < ?)",
+            (step, user_id, step),
+        ).rowcount > 0
 
 
 def get_user(username: str):
@@ -101,33 +202,69 @@ def get_user(username: str):
         return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
 
 
+def get_user_by_id(user_id: int):
+    with connect() as conn:
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
 def list_users():
     with connect() as conn:
-        return conn.execute("SELECT username, created_at FROM users ORDER BY username").fetchall()
+        return conn.execute(
+            """
+            SELECT u.username, u.created_at, u.is_admin, u.must_change_password,
+                   u.totp_secret IS NOT NULL AS has_2fa,
+                   (SELECT COUNT(*) FROM sessions s
+                     WHERE s.user_id = u.id AND s.expires_at > ?) AS sessions
+            FROM users u ORDER BY u.username
+            """,
+            (now(),),
+        ).fetchall()
+
+
+def admin_count() -> int:
+    with connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0]
 
 
 # ------------------------------------------------------------- sessions
 
-def create_session(user_id: int) -> str:
+def create_session(user_id: int, max_age: int) -> str:
     """Start a login session; returns the token to put in the (signed) cookie."""
     token = new_session_token()
     with connect() as conn:
         conn.execute(
-            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-            (hash_token(token), user_id, now(), now(config.SESSION_MAX_AGE)),
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, auth_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (hash_token(token), user_id, now(), now(max_age), now()),
         )
     return token
 
 
-def session_user(token: str) -> str | None:
-    """Username for a valid, unexpired session token, else None."""
+def get_session(token: str):
+    """Session joined with its user, if valid and unexpired."""
     with connect() as conn:
-        row = conn.execute(
-            "SELECT u.username FROM sessions s JOIN users u ON u.id = s.user_id "
-            "WHERE s.token_hash = ? AND s.expires_at > ?",
+        return conn.execute(
+            """
+            SELECT s.auth_at, s.totp_pending, u.id AS user_id, u.username, u.is_admin,
+                   u.must_change_password, u.totp_secret IS NOT NULL AS has_2fa
+            FROM sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at > ?
+            """,
             (hash_token(token), now()),
         ).fetchone()
-    return row["username"] if row else None
+
+
+def touch_auth(token: str) -> None:
+    """Record that the user just proved who they are (password, and 2FA if enabled)."""
+    with connect() as conn:
+        conn.execute("UPDATE sessions SET auth_at = ? WHERE token_hash = ?", (now(), hash_token(token)))
+
+
+def set_totp_pending(token: str, secret: str | None) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET totp_pending = ? WHERE token_hash = ?", (secret, hash_token(token))
+        )
 
 
 def delete_session(token: str) -> None:
@@ -143,12 +280,34 @@ def delete_user_sessions(username: str) -> int:
         ).rowcount
 
 
+# ------------------------------------------------------------ audit log
+
+def audit(actor: str, action: str, target: str | None = None,
+          details: str | None = None, ip: str | None = None) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO audit_log (ts, actor, action, target, details, ip) VALUES (?, ?, ?, ?, ?, ?)",
+            (now(), actor, action, target, details, ip),
+        )
+
+
+def recent_audit(limit: int = 200):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT ts, actor, action, target, details, ip FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
 # ----------------------------------------------------------- housekeeping
 
 def purge_expired(retention_days: int) -> tuple[int, int]:
-    """Delete expired sessions and (if retention_days > 0) old pages."""
+    """Delete expired sessions, old audit entries and (if retention_days > 0) old pages."""
     with connect() as conn:
         sessions = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now(),)).rowcount
+        conn.execute(
+            "DELETE FROM audit_log WHERE ts < ?", (now(-AUDIT_RETENTION_DAYS * 86400),)
+        )
         pages = 0
         if retention_days > 0:
             pages = conn.execute(

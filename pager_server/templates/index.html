@@ -1,21 +1,5 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pager</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <header>
-    <h1>Pager</h1>
-    <form method="post" action="/logout">
-      <span class="muted">Signed in as <strong>{{ user }}</strong></span>
-      <button type="submit" class="link">Sign out</button>
-    </form>
-  </header>
-
-  <main>
+{% extends "base.html" %}
+{% block content %}
     <section class="card">
       <form id="compose">
         <label for="text">Message</label>
@@ -38,8 +22,5 @@
       <h2>Recent pages</h2>
       <ul id="messages" class="messages"><li class="muted">Loading…</li></ul>
     </section>
-  </main>
-
-  <script src="/static/app.js"></script>
-</body>
-</html>
+{% endblock %}
+{% block scripts %}<script src="/static/app.js"></script>{% endblock %}

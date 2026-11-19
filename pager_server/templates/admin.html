@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Pager · Admin{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+    <p id="status" class="banner hidden" role="status"></p>
+
+    <section class="card">
+      <h2>Users</h2>
+      <div class="table-wrap">
+        <table id="users">
+          <thead><tr><th>User</th><th>Role</th><th>2FA</th><th>Status</th><th>Sessions</th><th>Created</th><th></th></tr></thead>
+          <tbody><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <form id="add-user" class="inline-form">
+        <label>New user
+          <input name="username" required maxlength="32" pattern="[A-Za-z0-9._\-]{1,32}" placeholder="username">
+        </label>
+        <label class="checkbox"><input type="checkbox" name="is_admin"> Admin</label>
+        <button type="submit">Add user</button>
+      </form>
+      <p class="muted small">New users get a temporary password that they must change at first sign-in.
+        Admins must also set up two-factor authentication.</p>
+    </section>
+
+    <section class="card">
+      <h2>Devices</h2>
+      <div class="table-wrap">
+        <table id="devices">
+          <thead><tr><th>Device</th><th>Status</th><th>Last seen</th><th>Created</th><th></th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <form id="add-device" class="inline-form">
+        <label>New device
+          <input name="name" required maxlength="32" pattern="[A-Za-z0-9._\-]{1,32}" placeholder="pager-01">
+        </label>
+        <button type="submit">Add device</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Audit log</h2>
+      <div class="table-wrap scroll">
+        <table id="audit">
+          <thead><tr><th>Time</th><th>By</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Page history</h2>
+      <div class="table-wrap scroll">
+        <table id="history">
+          <thead><tr><th>#</th><th>Time</th><th>From</th><th>Message</th><th>Received</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <dialog id="reauth-dialog">
+      <form id="reauth-form" method="dialog">
+        <h2>Confirm it's you</h2>
+        <p class="muted">Admin changes need your password and a fresh code.</p>
+        <p id="reauth-error" class="error"></p>
+        <label>Password
+          <input name="password" type="password" autocomplete="current-password" required maxlength="256">
+        </label>
+        <label>Code from your authenticator app
+          <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required>
+        </label>
+        <div class="row">
+          <button type="button" id="reauth-cancel" class="secondary">Cancel</button>
+          <button type="submit">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="secret-dialog">
+      <h2 id="secret-title"></h2>
+      <p id="secret-text"></p>
+      <p><code id="secret-value" class="secret"></code></p>
+      <p class="warn small">This is shown only once. It isn't stored anywhere you can look it up later.</p>
+      <div class="row">
+        <button type="button" id="secret-copy" class="secondary">Copy</button>
+        <button type="button" id="secret-close">Done</button>
+      </div>
+    </dialog>
+{% endblock %}
+{% block scripts %}<script src="/static/admin.js"></script>{% endblock %}

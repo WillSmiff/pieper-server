@@ -31,6 +31,16 @@ class Hub:
             if self._conns.get(device_id) is ws:
                 del self._conns[device_id]
 
+    async def kick(self, device_id: int) -> None:
+        """Disconnect a device (after its token was rotated or it was deleted)."""
+        async with self._lock:
+            ws = self._conns.pop(device_id, None)
+        if ws is not None:
+            try:
+                await ws.close(code=4001, reason="token revoked")
+            except Exception:
+                pass
+
     def online_ids(self) -> set[int]:
         return set(self._conns)
 

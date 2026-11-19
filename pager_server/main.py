@@ -5,31 +5,37 @@ import json
 import logging
 import re
 import time
-from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, RedirectResponse
+import qrcode
+import qrcode.image.svg
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import config, db
+from . import admin, config, db
+from .auth import (
+    Ctx, check_password, clear_failures, client_ip, get_ctx, is_throttled, page,
+    password_problem, record_failure, require_user, session_max_age, throttle_keys, verify_totp,
+)
 from .hub import hub
-from .security import DUMMY_HASH, verify_password
+from .security import DUMMY_HASH, new_totp_secret, totp_match, totp_uri
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("pager")
 
 BASE = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=BASE / "templates")
+PENDING_2FA_SECONDS = 300
 
 
 async def housekeeping() -> None:
-    """Hourly: drop expired sessions and pages older than the retention period."""
+    """Hourly: drop expired sessions, old audit entries and pages past the retention period."""
     while True:
         try:
             sessions, pages = await run_in_threadpool(db.purge_expired, config.RETENTION_DAYS)
@@ -43,6 +49,8 @@ async def housekeeping() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    if db.admin_count() == 0:
+        log.warning("no admin account yet: create one with `python manage.py make-admin <user>`")
     task = asyncio.create_task(housekeeping())
     yield
     task.cancel()
@@ -60,25 +68,40 @@ app.add_middleware(
     https_only=config.COOKIE_SECURE,
 )
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+app.include_router(admin.router)
+
+
+@app.middleware("http")
+async def origin_check_and_no_store(request: Request, call_next):
+    # Defence in depth against cross-site requests, on top of the SameSite=strict cookie:
+    # state-changing requests must come from this site's own pages.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        fetch_site = request.headers.get("sec-fetch-site")
+        host = request.headers.get("host", "")
+        if (origin is not None and urlsplit(origin).netloc != host) or fetch_site not in (
+            None, "same-origin", "none"
+        ):
+            return JSONResponse({"error": "Cross-site request blocked"}, status_code=403)
+    response = await call_next(request)
+    if not request.url.path.startswith("/static/"):
+        # Pages can contain one-time secrets (tokens, temporary passwords): never cache.
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+    if exc.status_code == 401:
+        return RedirectResponse("/login", status_code=303)
+    if exc.detail == "account_setup_required":
+        return RedirectResponse("/account", status_code=303)
+    return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
 
 
 # ------------------------------------------------------------------ helpers
-
-def current_user(request: Request) -> str | None:
-    """The logged-in user, based on a server-side session (revocable)."""
-    sid = request.session.get("sid")
-    user = db.session_user(sid) if isinstance(sid, str) else None
-    if user is None and request.session:
-        request.session.clear()
-    return user
-
-
-def require_user(request: Request) -> str:
-    user = current_user(request)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not logged in")
-    return user
-
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
@@ -88,43 +111,6 @@ def clean_text(text: str) -> str:
     text = _CONTROL_CHARS.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
-# Failed-login timestamps per key ("ip:<addr>" or "user:<name>"), in memory.
-_failures: dict[str, deque] = {}
-_MAX_TRACKED_KEYS = 10_000
-
-# scrypt uses ~16 MB and tens of ms per check; run it off the event loop and
-# limit how many run at once so login floods can't starve page delivery.
-_hash_slots = asyncio.Semaphore(2)
-
-
-def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
-def _recent_failures(key: str) -> int:
-    q = _failures.get(key)
-    if not q:
-        return 0
-    cutoff = time.monotonic() - config.LOGIN_WINDOW_SECONDS
-    while q and q[0] < cutoff:
-        q.popleft()
-    if not q:
-        del _failures[key]
-        return 0
-    return len(q)
-
-
-def _record_failure(key: str) -> None:
-    _failures.setdefault(key, deque()).append(time.monotonic())
-    while len(_failures) > _MAX_TRACKED_KEYS:  # drop the oldest-tracked keys
-        _failures.pop(next(iter(_failures)))
-
-
-async def check_password(password: str, stored_hash: str) -> bool:
-    async with _hash_slots:
-        return await run_in_threadpool(verify_password, password, stored_hash)
 
 
 def page_payload(msg: dict) -> dict:
@@ -137,55 +123,97 @@ def page_payload(msg: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------- web pages
-
-@app.get("/")
-async def index(request: Request):
-    user = current_user(request)
-    if user is None:
-        return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(
-        request, "index.html", {"user": user, "max_len": config.MAX_MESSAGE_LENGTH}
-    )
-
-
-@app.get("/login")
-async def login_form(request: Request):
-    if current_user(request):
-        return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"error": None})
-
-
-@app.post("/login")
-async def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    ip = client_ip(request)
-    username = username.strip()[:64]
-    ip_key, user_key = f"ip:{ip}", f"user:{username.lower()}"
-    if (
-        _recent_failures(ip_key) >= config.LOGIN_MAX_FAILURES
-        or _recent_failures(user_key) >= config.LOGIN_MAX_FAILURES_PER_USER
-    ):
-        return templates.TemplateResponse(
-            request, "login.html",
-            {"error": "Too many failed attempts. Try again later."}, status_code=429,
-        )
-    user = db.get_user(username)
-    ok = await check_password(password, user["password_hash"] if user else DUMMY_HASH)
-    if not (user and ok):
-        _record_failure(ip_key)
-        _record_failure(user_key)
-        log.info("failed login from %s", ip)
-        return templates.TemplateResponse(
-            request, "login.html", {"error": "Invalid username or password."}, status_code=401
-        )
-    _failures.pop(ip_key, None)
-    _failures.pop(user_key, None)
+def start_session(request: Request, user) -> None:
     old_sid = request.session.get("sid")
     if isinstance(old_sid, str):
         db.delete_session(old_sid)
     request.session.clear()
-    request.session["sid"] = db.create_session(user["id"])
-    log.info("user %s logged in from %s", user["username"], ip)
+    request.session["sid"] = db.create_session(user["id"], session_max_age(bool(user["is_admin"])))
+    db.audit(user["username"], "login", ip=client_ip(request))
+    log.info("user %s logged in from %s", user["username"], client_ip(request))
+
+
+def pending_2fa_user(request: Request):
+    pending = request.session.get("pending_2fa")
+    if not isinstance(pending, dict) or time.time() - pending.get("ts", 0) > PENDING_2FA_SECONDS:
+        return None
+    return db.get_user_by_id(pending.get("uid"))
+
+
+def qr_svg(data: str) -> Markup:
+    img = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, border=2)
+    return Markup(img.to_string(encoding="unicode"))  # generated by us, contains no user input
+
+
+def too_many(request: Request, template: str, ctx: Ctx | None = None, **extra):
+    return page(request, template, ctx, status_code=429,
+                error="Too many failed attempts. Try again later.", **extra)
+
+
+# ---------------------------------------------------------------- web pages
+
+@app.get("/")
+async def index(request: Request):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    if ctx.setup_required:
+        return RedirectResponse("/account", status_code=303)
+    return page(request, "index.html", ctx, max_len=config.MAX_MESSAGE_LENGTH)
+
+
+@app.get("/login")
+async def login_form(request: Request):
+    if get_ctx(request):
+        return RedirectResponse("/", status_code=303)
+    return page(request, "login.html", None, error=None)
+
+
+@app.post("/login")
+async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    username = username.strip()[:64]
+    ip_key, user_key = throttle_keys(request, username)
+    if is_throttled(ip_key, user_key):
+        return too_many(request, "login.html")
+    user = db.get_user(username)
+    ok = await check_password(password, user["password_hash"] if user else DUMMY_HASH)
+    if not (user and ok):
+        record_failure(ip_key, user_key)
+        log.info("failed login from %s", client_ip(request))
+        return page(request, "login.html", None, status_code=401,
+                    error="Invalid username or password.")
+    if user["totp_secret"]:
+        # Password OK; the session only starts after the second factor.
+        request.session.clear()
+        request.session["pending_2fa"] = {"uid": user["id"], "ts": time.time()}
+        return RedirectResponse("/login/2fa", status_code=303)
+    clear_failures(ip_key, user_key)
+    start_session(request, user)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/login/2fa")
+async def login_2fa_form(request: Request):
+    if pending_2fa_user(request) is None:
+        return RedirectResponse("/login", status_code=303)
+    return page(request, "login_2fa.html", None, error=None)
+
+
+@app.post("/login/2fa")
+async def login_2fa(request: Request, code: str = Form(...)):
+    user = pending_2fa_user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    ip_key, user_key = throttle_keys(request, user["username"])
+    if is_throttled(ip_key, user_key):
+        return too_many(request, "login_2fa.html")
+    if not verify_totp(user["id"], code):
+        record_failure(ip_key, user_key)
+        db.audit(user["username"], "2fa_failed", ip=client_ip(request))
+        return page(request, "login_2fa.html", None, status_code=401,
+                    error="That code is not valid. Wait for a new code and try again.")
+    clear_failures(ip_key, user_key)
+    start_session(request, user)
     return RedirectResponse("/", status_code=303)
 
 
@@ -198,16 +226,129 @@ async def logout(request: Request):
     return RedirectResponse("/login", status_code=303)
 
 
+# ------------------------------------------------------------- account pages
+
+DONE_MESSAGES = {
+    "password": "Your password was changed. Other sessions were signed out.",
+    "2fa": "Two-factor authentication is now enabled.",
+    "2fa_off": "Two-factor authentication was turned off.",
+}
+
+
+def account_page(request: Request, ctx: Ctx, status_code: int = 200, **extra):
+    return page(request, "account.html", ctx, status_code=status_code,
+                must_change=ctx.must_change_password, has_2fa=ctx.has_2fa,
+                admin_account=ctx.is_admin, min_len=config.MIN_PASSWORD_LENGTH, **extra)
+
+
+@app.get("/account")
+async def account(request: Request, done: str | None = None):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    return account_page(request, ctx, message=DONE_MESSAGES.get(done or ""))
+
+
+@app.post("/account/password")
+async def change_password(request: Request, current: str = Form(...), new: str = Form(...),
+                          confirm: str = Form(...)):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    ip_key, user_key = throttle_keys(request, ctx.username)
+    if is_throttled(ip_key, user_key):
+        return account_page(request, ctx, 429, pw_error="Too many failed attempts. Try again later.")
+    user = db.get_user_by_id(ctx.user_id)
+    if not await check_password(current, user["password_hash"]):
+        record_failure(ip_key, user_key)
+        return account_page(request, ctx, 400, pw_error="Your current password is incorrect.")
+    problem = password_problem(new, confirm)
+    if problem is None and new == current:
+        problem = "Choose a password different from the current one."
+    if problem:
+        return account_page(request, ctx, 400, pw_error=problem)
+    db.set_password(ctx.username, new, must_change=False, keep_session=ctx.token)
+    db.touch_auth(ctx.token)
+    db.audit(ctx.username, "password_changed", ip=client_ip(request))
+    return RedirectResponse("/account?done=password", status_code=303)
+
+
+@app.get("/account/2fa")
+async def setup_2fa_form(request: Request):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    if ctx.has_2fa or ctx.must_change_password:
+        return RedirectResponse("/account", status_code=303)
+    secret = new_totp_secret()
+    db.set_totp_pending(ctx.token, secret)
+    return setup_2fa_page(request, ctx, secret)
+
+
+def setup_2fa_page(request: Request, ctx: Ctx, secret: str, status_code: int = 200, error=None):
+    uri = totp_uri(secret, ctx.username, config.TOTP_ISSUER)
+    grouped = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
+    return page(request, "account_2fa.html", ctx, status_code=status_code,
+                qr=qr_svg(uri), secret=grouped, error=error)
+
+
+@app.post("/account/2fa")
+async def setup_2fa(request: Request, code: str = Form(...)):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    if ctx.has_2fa or not ctx.totp_pending:
+        return RedirectResponse("/account", status_code=303)
+    ip_key, user_key = throttle_keys(request, ctx.username)
+    if is_throttled(ip_key, user_key):
+        return setup_2fa_page(request, ctx, ctx.totp_pending, 429,
+                              "Too many failed attempts. Try again later.")
+    step = totp_match(ctx.totp_pending, code, None)
+    if step is None:
+        record_failure(ip_key, user_key)
+        return setup_2fa_page(request, ctx, ctx.totp_pending, 400,
+                              "That code doesn't match. Check the time on your phone and try again.")
+    db.set_totp(ctx.user_id, ctx.totp_pending, used_step=step)
+    db.set_totp_pending(ctx.token, None)
+    db.touch_auth(ctx.token)
+    db.audit(ctx.username, "2fa_enabled", ip=client_ip(request))
+    return RedirectResponse("/account?done=2fa", status_code=303)
+
+
+@app.post("/account/2fa/disable")
+async def disable_2fa(request: Request, password: str = Form(...), code: str = Form(...)):
+    ctx = get_ctx(request)
+    if ctx is None:
+        return RedirectResponse("/login", status_code=303)
+    if ctx.is_admin:
+        return account_page(request, ctx, 403, tfa_error="Admins must keep two-factor authentication on.")
+    if not ctx.has_2fa:
+        return RedirectResponse("/account", status_code=303)
+    ip_key, user_key = throttle_keys(request, ctx.username)
+    if is_throttled(ip_key, user_key):
+        return account_page(request, ctx, 429, tfa_error="Too many failed attempts. Try again later.")
+    user = db.get_user_by_id(ctx.user_id)
+    if not (await check_password(password, user["password_hash"]) and verify_totp(ctx.user_id, code)):
+        record_failure(ip_key, user_key)
+        return account_page(request, ctx, 400, tfa_error="Password or code is incorrect.")
+    db.set_totp(ctx.user_id, None)
+    db.audit(ctx.username, "2fa_disabled", ip=client_ip(request))
+    return RedirectResponse("/account?done=2fa_off", status_code=303)
+
+
 # ---------------------------------------------------------------- JSON API
 
 class PageIn(BaseModel):
     text: str
 
 
+class ReauthIn(BaseModel):
+    password: str
+    code: str = ""
+
+
 @app.post("/api/messages")
-async def send_page(body: PageIn, request: Request):
-    # JSON body + SameSite=strict cookie means cross-site forms can't forge this.
-    user = require_user(request)
+async def send_page(body: PageIn, ctx: Ctx = Depends(require_user)):
     text = clean_text(body.text)
     if not text:
         raise HTTPException(status_code=400, detail="Message is empty")
@@ -215,15 +356,14 @@ async def send_page(body: PageIn, request: Request):
         raise HTTPException(
             status_code=400, detail=f"Message exceeds {config.MAX_MESSAGE_LENGTH} characters"
         )
-    msg = db.add_message(user, text)
+    msg = db.add_message(ctx.username, text)
     delivered = await hub.broadcast(page_payload(msg))
-    log.info("page #%s from %s sent to %d device(s)", msg["id"], user, delivered)
+    log.info("page #%s from %s sent to %d device(s)", msg["id"], ctx.username, delivered)
     return {"id": msg["id"], "sent_to": delivered}
 
 
 @app.get("/api/status")
-async def status(request: Request):
-    require_user(request)
+async def status(ctx: Ctx = Depends(require_user)):
     online = hub.online_ids()
     devices = [
         {"name": d["name"], "online": d["id"] in online, "last_seen": d["last_seen"]}
@@ -233,14 +373,26 @@ async def status(request: Request):
     return {"devices": devices, "messages": messages, "device_count": len(devices)}
 
 
-@app.get("/healthz")
-async def healthz():
+@app.post("/api/reauth")
+async def reauth(body: ReauthIn, request: Request, ctx: Ctx = Depends(require_user)):
+    """Confirm identity again before sensitive (admin) actions."""
+    ip_key, user_key = throttle_keys(request, ctx.username)
+    if is_throttled(ip_key, user_key):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+    user = db.get_user_by_id(ctx.user_id)
+    ok = await check_password(body.password, user["password_hash"])
+    if ok and ctx.has_2fa:
+        ok = verify_totp(ctx.user_id, body.code)
+    if not ok:
+        record_failure(ip_key, user_key)
+        raise HTTPException(status_code=400, detail="Password or code is incorrect")
+    db.touch_auth(ctx.token)
     return {"ok": True}
 
 
-@app.exception_handler(HTTPException)
-async def http_error(request: Request, exc: HTTPException):
-    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
 
 
 # ---------------------------------------------------------- device socket
@@ -302,7 +454,7 @@ async def device_socket(ws: WebSocket):
                 await ws.send_json({"type": "error", "error": f"unknown type {kind!r}"})
     except WebSocketDisconnect:
         pass
-    except Exception as exc:  # network errors etc.
+    except Exception as exc:  # network errors, device deleted, etc.
         log.warning("device %s socket error: %s", name, exc)
     finally:
         await hub.unregister(device_id, ws)

@@ -1,14 +1,23 @@
-"""Admin CLI for the pager server.
+"""Admin CLI for the pager server: first-time setup and emergency access.
 
-    python manage.py add-user alice
-    python manage.py passwd alice
+Day-to-day management is done in the web backoffice (/admin). Use this CLI to
+create the first admin, or to get back in when no admin can sign in.
+
+    python manage.py add-user alice [--admin]  # prompts for a password
+    python manage.py make-admin alice          # grant admin (2FA setup is required at next sign-in)
+    python manage.py revoke-admin alice
+    python manage.py passwd alice              # set a password; ends alice's sessions
+    python manage.py reset-2fa alice           # remove 2FA (lost phone); ends sessions
+    python manage.py logout alice              # end all of alice's web sessions
     python manage.py del-user alice
-    python manage.py logout alice             # end all of alice's web sessions
     python manage.py users
-    python manage.py add-device pager-01      # prints the device token once
-    python manage.py rotate-device pager-01   # issue a new token
+    python manage.py add-device pager-01       # prints the device token once
+    python manage.py rotate-device pager-01    # issue a new token (restart the server to drop
+                                               # a connection that uses the old token)
     python manage.py del-device pager-01
     python manage.py devices
+
+On the VPS, always run it as the pager user with PAGER_DATA_DIR=/var/lib/pager.
 """
 
 import argparse
@@ -17,13 +26,17 @@ import sqlite3
 import sys
 
 from pager_server import config, db
+from pager_server.security import valid_name
 
 
 def ask_password() -> str:
     while True:
         pw = getpass.getpass("Password: ")
-        if len(pw) < 8:
-            print("Use at least 8 characters.")
+        if len(pw) < config.MIN_PASSWORD_LENGTH:
+            print(f"Use at least {config.MIN_PASSWORD_LENGTH} characters.")
+            continue
+        if len(pw) > config.MAX_PASSWORD_LENGTH:
+            print(f"Use at most {config.MAX_PASSWORD_LENGTH} characters.")
             continue
         if pw != getpass.getpass("Repeat password: "):
             print("Passwords do not match.")
@@ -36,10 +49,18 @@ def print_token(name: str, token: str) -> None:
     print(f"\n    {token}\n")
 
 
+def fail(msg: str) -> int:
+    print(msg, file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Pager server administration")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for cmd in ("add-user", "passwd", "del-user", "logout"):
+    add = sub.add_parser("add-user")
+    add.add_argument("username")
+    add.add_argument("--admin", action="store_true", help="give the user admin rights")
+    for cmd in ("passwd", "del-user", "logout", "make-admin", "revoke-admin", "reset-2fa"):
         sub.add_parser(cmd).add_argument("username")
     sub.add_parser("users")
     for cmd in ("add-device", "rotate-device", "del-device"):
@@ -50,46 +71,80 @@ def main() -> int:
     print(f"Database: {config.DB_PATH}  (set PAGER_DATA_DIR to change)", file=sys.stderr)
     db.init()
 
+    def audit(action: str, target: str, details: str | None = None) -> None:
+        db.audit("cli", action, target, details)
+
+    name = getattr(args, "username", None) or getattr(args, "name", None)
+    if args.cmd in ("passwd", "del-user", "logout", "make-admin", "revoke-admin", "reset-2fa"):
+        user = db.get_user(name)
+        if user is None:
+            return fail(f"No such user '{name}'.")
+        name = user["username"]
+
     if args.cmd == "add-user":
-        if db.get_user(args.username):
-            print(f"User '{args.username}' already exists.", file=sys.stderr)
-            return 1
-        db.add_user(args.username, ask_password())
-        print(f"Created user '{args.username}'.")
+        if not valid_name(name):
+            return fail("Use 1-32 letters, digits, dots, dashes or underscores.")
+        if db.get_user(name):
+            return fail(f"User '{name}' already exists.")
+        db.add_user(name, ask_password(), is_admin=args.admin)
+        audit("user_created", name, "admin" if args.admin else "user")
+        print(f"Created {'admin' if args.admin else 'user'} '{name}'.")
+        if args.admin:
+            print("They must set up two-factor authentication at first sign-in.")
+    elif args.cmd == "make-admin":
+        db.set_admin(name, True)
+        audit("admin_granted", name)
+        print(f"'{name}' is now an admin. Two-factor setup is required at next sign-in.")
+    elif args.cmd == "revoke-admin":
+        try:
+            db.set_admin(name, False)
+        except db.LastAdminError as exc:
+            return fail(str(exc))
+        audit("admin_revoked", name)
+        print(f"'{name}' is no longer an admin.")
     elif args.cmd == "passwd":
-        if not db.get_user(args.username):
-            print(f"No such user '{args.username}'.", file=sys.stderr)
-            return 1
-        db.set_password(args.username, ask_password())
+        db.set_password(name, ask_password())
+        audit("password_reset", name)
         print("Password updated; existing sessions were ended.")
+    elif args.cmd == "reset-2fa":
+        db.reset_totp(name)
+        audit("2fa_reset", name)
+        print(f"Two-factor authentication removed for '{name}'; their sessions were ended.")
     elif args.cmd == "logout":
-        n = db.delete_user_sessions(args.username)
-        print(f"Ended {n} session(s) for '{args.username}'.")
+        n = db.delete_user_sessions(name)
+        audit("sessions_ended", name, f"{n} session(s)")
+        print(f"Ended {n} session(s) for '{name}'.")
     elif args.cmd == "del-user":
-        if not db.delete_user(args.username):
-            print(f"No such user '{args.username}'.", file=sys.stderr)
-            return 1
-        print(f"Deleted user '{args.username}'.")
+        try:
+            db.delete_user(name)
+        except db.LastAdminError as exc:
+            return fail(str(exc))
+        audit("user_deleted", name)
+        print(f"Deleted user '{name}'.")
     elif args.cmd == "users":
         for u in db.list_users():
-            print(f"{u['username']:<24} created {u['created_at']}")
+            role = "admin" if u["is_admin"] else "user"
+            tfa = "2FA on" if u["has_2fa"] else "2FA off"
+            print(f"{u['username']:<24} {role:<6} {tfa:<8} created {u['created_at']}")
     elif args.cmd == "add-device":
+        if not valid_name(name):
+            return fail("Use 1-32 letters, digits, dots, dashes or underscores.")
         try:
-            print_token(args.name, db.add_device(args.name))
+            print_token(name, db.add_device(name))
         except sqlite3.IntegrityError:
-            print(f"Device '{args.name}' already exists.", file=sys.stderr)
-            return 1
+            return fail(f"Device '{name}' already exists.")
+        audit("device_created", name)
     elif args.cmd == "rotate-device":
-        token = db.rotate_device_token(args.name)
+        token = db.rotate_device_token(name)
         if token is None:
-            print(f"No such device '{args.name}'.", file=sys.stderr)
-            return 1
-        print_token(args.name, token)
+            return fail(f"No such device '{name}'.")
+        audit("device_token_rotated", name)
+        print_token(name, token)
     elif args.cmd == "del-device":
-        if not db.delete_device(args.name):
-            print(f"No such device '{args.name}'.", file=sys.stderr)
-            return 1
-        print(f"Deleted device '{args.name}'.")
+        if not db.delete_device(name):
+            return fail(f"No such device '{name}'.")
+        audit("device_deleted", name)
+        print(f"Deleted device '{name}'.")
     elif args.cmd == "devices":
         for d in db.list_devices():
             print(f"{d['name']:<24} last seen {d['last_seen'] or 'never'}")

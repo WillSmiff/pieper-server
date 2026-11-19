@@ -21,6 +21,17 @@ COOKIE_SECURE = os.environ.get("PAGER_COOKIE_SECURE", "0") == "1"
 # Absolute session lifetime: a login is valid for this long, regardless of activity.
 SESSION_MAX_AGE = int(os.environ.get("PAGER_SESSION_MAX_AGE", str(7 * 24 * 3600)))
 
+# Admin sessions are shorter, and sensitive admin actions need a password/2FA
+# check within the last REAUTH_SECONDS.
+ADMIN_SESSION_MAX_AGE = int(os.environ.get("PAGER_ADMIN_SESSION_MAX_AGE", str(12 * 3600)))
+REAUTH_SECONDS = int(os.environ.get("PAGER_REAUTH_SECONDS", "600"))
+
+MIN_PASSWORD_LENGTH = int(os.environ.get("PAGER_MIN_PASSWORD_LENGTH", "10"))
+MAX_PASSWORD_LENGTH = 256
+
+# Name shown in authenticator apps.
+TOTP_ISSUER = os.environ.get("PAGER_TOTP_ISSUER", "Pager")
+
 # Login throttling within a sliding window: max failed attempts per client IP,
 # and per username (protects against attacks spread over many IPs).
 LOGIN_MAX_FAILURES = int(os.environ.get("PAGER_LOGIN_MAX_FAILURES", "10"))

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Pager{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="page {% block main_class %}{% endblock %}">
+  {% if user %}
+  <header>
+    <h1><a href="/">Pager</a></h1>
+    <nav>
+      {% if not setup_required %}<a href="/">Send</a>{% endif %}
+      {% if is_admin %}<a href="/admin">Admin</a>{% endif %}
+      <a href="/account">Account</a>
+      <form method="post" action="/logout">
+        <span class="muted">{{ user }}</span>
+        <button type="submit" class="link">Sign out</button>
+      </form>
+    </nav>
+  </header>
+  {% endif %}
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

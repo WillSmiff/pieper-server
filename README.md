@@ -9,8 +9,13 @@ sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
   server. Pages are pushed to it right away. If a device was offline, it catches up with `sync`.
 - **Storage**: SQLite in `data/`. Passwords are hashed with scrypt, and device tokens and login
   session tokens are stored only as SHA-256 hashes.
-- **Sessions** are stored server-side and expire after 7 days. Logging out, changing a password
-  or deleting a user ends them immediately. Pages older than 90 days are deleted automatically.
+- **Sessions** are stored server-side and expire after 7 days (12 hours for admins). Logging out,
+  changing a password or deleting a user ends them immediately. Pages older than 90 days are
+  deleted automatically.
+- **Accounts**: users can change their own password and turn on two-factor authentication (TOTP,
+  any authenticator app) on the Account page.
+- **Admin backoffice** (`/admin`): manage users, devices and sessions, see the page history and an
+  audit log of all admin actions. See [Admin backoffice](#admin-backoffice).
 
 ## Setup
 
@@ -20,15 +25,21 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Create users and devices:
+Create the first admin. After that, everything else can be done in the web backoffice:
 
 ```bash
-python manage.py add-user alice          # prompts for a password (min 8 chars)
-python manage.py add-device pager-01     # prints the device token ONCE – put it in the firmware
+python manage.py add-user alice --admin  # prompts for a password (min 10 chars)
+```
+
+At first sign-in, alice has to set up two-factor authentication before she can do anything else.
+
+`manage.py` remains available for emergencies, such as when no admin can sign in:
+
+```bash
+python manage.py make-admin alice | revoke-admin alice
+python manage.py passwd alice | reset-2fa alice | logout alice | del-user alice
+python manage.py add-device pager-01 | rotate-device pager-01 | del-device pager-01
 python manage.py users | devices
-python manage.py passwd alice | del-user alice   # both also end alice's sessions
-python manage.py logout alice                    # end all of alice's web sessions
-python manage.py rotate-device pager-01 | del-device pager-01
 ```
 
 Run:
@@ -55,10 +66,41 @@ python tools/fake_device.py ws://localhost:8000/ws/device <token>
 | `PAGER_COOKIE_SECURE` | `0` | Set to `1` when served over HTTPS |
 | `PAGER_MAX_MESSAGE_LENGTH` | `200` | Max characters per page |
 | `PAGER_SESSION_MAX_AGE` | `604800` | Login lifetime in seconds (absolute, not extended by activity) |
+| `PAGER_ADMIN_SESSION_MAX_AGE` | `43200` | Login lifetime for admins |
+| `PAGER_REAUTH_SECONDS` | `600` | Admin changes need a password + 2FA check this recent |
+| `PAGER_MIN_PASSWORD_LENGTH` | `10` | Minimum password length |
+| `PAGER_TOTP_ISSUER` | `Pager` | Name shown in authenticator apps |
 | `PAGER_LOGIN_MAX_FAILURES` / `PAGER_LOGIN_WINDOW_SECONDS` | `10` / `900` | Failed logins allowed per IP per window |
 | `PAGER_LOGIN_MAX_FAILURES_PER_USER` | `20` | Failed logins allowed per username per window |
 | `PAGER_RETENTION_DAYS` | `90` | Delete pages older than this (`0` = keep forever) |
 | `PAGER_SYNC_LIMIT` | `20` | Max missed pages returned per `sync` |
+
+## Admin backoffice
+
+Admins see an **Admin** link in the header. The backoffice covers what used to need SSH:
+
+| Area | Actions |
+|---|---|
+| Users | Add a user (they get a one-time temporary password), reset a password, make or remove admin, reset 2FA (lost phone), sign a user out everywhere, delete |
+| Devices | Add a device or issue a new token (both shown once), delete. Revoked devices are disconnected immediately |
+| Audit log | Who did what and when: logins, failed 2FA codes, password and 2FA changes, and all admin actions |
+| Page history | The last 200 pages with delivery counts |
+
+Security rules:
+
+- Every `/admin` and `/api/admin/*` route requires an admin account; others get a 403.
+- Admin accounts must use two-factor authentication. Until it is set up, an admin can only reach
+  the Account page.
+- Every change in the backoffice needs a password + 2FA confirmation from the last 10 minutes. The
+  page asks for it when needed.
+- You can't change your own account from the backoffice (use the Account page), and the last
+  admin can't be demoted or deleted.
+- Temporary passwords and device tokens are shown once and never cached by the browser.
+- Requests that change something are rejected if they come from another website (an `Origin`
+  check on top of the `SameSite=strict` cookie).
+
+Server operations (deploys, restarts, logs, backups) deliberately stay on SSH. The web app runs
+without any system privileges.
 
 ## Deploying with HTTPS
 
@@ -78,6 +120,12 @@ Deploying an update on the VPS:
 cd /opt/pager && sudo -u pager git pull && sudo -u pager .venv/bin/pip install -r requirements.txt
 sudo cp deploy/pager.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart pager
 sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
+
+After upgrading to the version with the admin backoffice, make your own account an admin once:
+
+```bash
+cd /opt/pager && sudo -u pager PAGER_DATA_DIR=/var/lib/pager .venv/bin/python manage.py make-admin <you>
 ```
 
 When using `manage.py` on the VPS, always set `PAGER_DATA_DIR=/var/lib/pager`. It prints which
