@@ -18,11 +18,17 @@ MAX_MESSAGE_LENGTH = int(os.environ.get("PAGER_MAX_MESSAGE_LENGTH", "200"))
 # cookie is only ever sent over TLS.
 COOKIE_SECURE = os.environ.get("PAGER_COOKIE_SECURE", "0") == "1"
 
+# Absolute session lifetime: a login is valid for this long, regardless of activity.
 SESSION_MAX_AGE = int(os.environ.get("PAGER_SESSION_MAX_AGE", str(7 * 24 * 3600)))
 
-# Login throttling: max failed attempts per client IP within the window.
+# Login throttling within a sliding window: max failed attempts per client IP,
+# and per username (protects against attacks spread over many IPs).
 LOGIN_MAX_FAILURES = int(os.environ.get("PAGER_LOGIN_MAX_FAILURES", "10"))
+LOGIN_MAX_FAILURES_PER_USER = int(os.environ.get("PAGER_LOGIN_MAX_FAILURES_PER_USER", "20"))
 LOGIN_WINDOW_SECONDS = int(os.environ.get("PAGER_LOGIN_WINDOW_SECONDS", "900"))
+
+# Pages older than this are deleted (0 = keep forever).
+RETENTION_DAYS = int(os.environ.get("PAGER_RETENTION_DAYS", "90"))
 
 # How many missed messages a device can fetch with a "sync" request.
 SYNC_LIMIT = int(os.environ.get("PAGER_SYNC_LIMIT", "20"))
@@ -36,7 +42,9 @@ def _load_secret_key() -> str:
     if path.exists():
         return path.read_text().strip()
     key = secrets.token_urlsafe(48)
-    path.write_text(key)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key)
     return key
 
 

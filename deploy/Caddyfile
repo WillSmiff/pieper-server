@@ -1,6 +1,29 @@
-# Replace pager.example.com with your own domain (its DNS A record must point at the VPS).
+# Replace piepertje.nl with your own domain if needed (its DNS A record must point at the VPS).
 # Install: sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
-pager.example.com {
+piepertje.nl {
 	encode gzip
+
+	# Nothing legitimate is bigger than a few KB (WebSocket frames are limited by uvicorn).
+	request_body {
+		max_size 64KB
+	}
+
+	header {
+		# Browsers must only ever use HTTPS for this site (1 year).
+		Strict-Transport-Security "max-age=31536000"
+		# Only load scripts/styles from this site; never allow framing (clickjacking).
+		Content-Security-Policy "default-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		# Don't advertise server software.
+		-Server
+	}
+
 	reverse_proxy 127.0.0.1:8000
+}
+
+# www has a DNS record (CNAME to @); send it to the main name.
+www.piepertje.nl {
+	redir https://piepertje.nl{uri} permanent
 }

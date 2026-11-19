@@ -1,5 +1,7 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-jinja2>=3.1
-itsdangerous>=2.1
-python-multipart>=0.0.9
+# Pinned for reproducible deploys. To upgrade: bump versions, test, then run
+# `pip-audit -r requirements.txt` to check for known vulnerabilities.
+fastapi==0.162.5
+uvicorn[standard]==0.54.0
+jinja2==3.1.6
+itsdangerous==2.2.0
+python-multipart==0.0.32

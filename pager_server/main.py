@@ -1,10 +1,11 @@
 """Pager server: web UI for sending pages + WebSocket endpoint for pager devices."""
 
+import asyncio
 import json
 import logging
 import re
 import time
-from collections import defaultdict, deque
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import config, db
@@ -26,13 +28,29 @@ BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=BASE / "templates")
 
 
+async def housekeeping() -> None:
+    """Hourly: drop expired sessions and pages older than the retention period."""
+    while True:
+        try:
+            sessions, pages = await run_in_threadpool(db.purge_expired, config.RETENTION_DAYS)
+            if sessions or pages:
+                log.info("housekeeping: removed %d expired session(s), %d old page(s)", sessions, pages)
+        except Exception:
+            log.exception("housekeeping failed")
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    task = asyncio.create_task(housekeeping())
     yield
+    task.cancel()
 
 
-app = FastAPI(title="Pager server", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="Pager server", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+)
 app.add_middleware(
     SessionMiddleware,
     secret_key=config.SECRET_KEY,
@@ -47,13 +65,17 @@ app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 # ------------------------------------------------------------------ helpers
 
 def current_user(request: Request) -> str | None:
-    return request.session.get("user")
+    """The logged-in user, based on a server-side session (revocable)."""
+    sid = request.session.get("sid")
+    user = db.session_user(sid) if isinstance(sid, str) else None
+    if user is None and request.session:
+        request.session.clear()
+    return user
 
 
 def require_user(request: Request) -> str:
     user = current_user(request)
-    if not user or db.get_user(user) is None:
-        request.session.clear()
+    if user is None:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user
 
@@ -68,19 +90,41 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-_failures: dict[str, deque] = defaultdict(deque)
+# Failed-login timestamps per key ("ip:<addr>" or "user:<name>"), in memory.
+_failures: dict[str, deque] = {}
+_MAX_TRACKED_KEYS = 10_000
+
+# scrypt uses ~16 MB and tens of ms per check; run it off the event loop and
+# limit how many run at once so login floods can't starve page delivery.
+_hash_slots = asyncio.Semaphore(2)
 
 
 def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def too_many_failures(ip: str) -> bool:
-    q = _failures[ip]
+def _recent_failures(key: str) -> int:
+    q = _failures.get(key)
+    if not q:
+        return 0
     cutoff = time.monotonic() - config.LOGIN_WINDOW_SECONDS
     while q and q[0] < cutoff:
         q.popleft()
-    return len(q) >= config.LOGIN_MAX_FAILURES
+    if not q:
+        del _failures[key]
+        return 0
+    return len(q)
+
+
+def _record_failure(key: str) -> None:
+    _failures.setdefault(key, deque()).append(time.monotonic())
+    while len(_failures) > _MAX_TRACKED_KEYS:  # drop the oldest-tracked keys
+        _failures.pop(next(iter(_failures)))
+
+
+async def check_password(password: str, stored_hash: str) -> bool:
+    async with _hash_slots:
+        return await run_in_threadpool(verify_password, password, stored_hash)
 
 
 def page_payload(msg: dict) -> dict:
@@ -98,7 +142,7 @@ def page_payload(msg: dict) -> dict:
 @app.get("/")
 async def index(request: Request):
     user = current_user(request)
-    if not user or db.get_user(user) is None:
+    if user is None:
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(
         request, "index.html", {"user": user, "max_len": config.MAX_MESSAGE_LENGTH}
@@ -115,28 +159,41 @@ async def login_form(request: Request):
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
     ip = client_ip(request)
-    if too_many_failures(ip):
+    username = username.strip()[:64]
+    ip_key, user_key = f"ip:{ip}", f"user:{username.lower()}"
+    if (
+        _recent_failures(ip_key) >= config.LOGIN_MAX_FAILURES
+        or _recent_failures(user_key) >= config.LOGIN_MAX_FAILURES_PER_USER
+    ):
         return templates.TemplateResponse(
             request, "login.html",
             {"error": "Too many failed attempts. Try again later."}, status_code=429,
         )
-    user = db.get_user(username.strip())
-    ok = verify_password(password, user["password_hash"] if user else DUMMY_HASH)
+    user = db.get_user(username)
+    ok = await check_password(password, user["password_hash"] if user else DUMMY_HASH)
     if not (user and ok):
-        _failures[ip].append(time.monotonic())
-        log.info("failed login for %r from %s", username, ip)
+        _record_failure(ip_key)
+        _record_failure(user_key)
+        log.info("failed login from %s", ip)
         return templates.TemplateResponse(
             request, "login.html", {"error": "Invalid username or password."}, status_code=401
         )
-    _failures.pop(ip, None)
+    _failures.pop(ip_key, None)
+    _failures.pop(user_key, None)
+    old_sid = request.session.get("sid")
+    if isinstance(old_sid, str):
+        db.delete_session(old_sid)
     request.session.clear()
-    request.session["user"] = user["username"]
+    request.session["sid"] = db.create_session(user["id"])
     log.info("user %s logged in from %s", user["username"], ip)
     return RedirectResponse("/", status_code=303)
 
 
 @app.post("/logout")
 async def logout(request: Request):
+    sid = request.session.get("sid")
+    if isinstance(sid, str):
+        db.delete_session(sid)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
 
@@ -178,7 +235,7 @@ async def status(request: Request):
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "devices_online": len(hub.online_ids())}
+    return {"ok": True}
 
 
 @app.exception_handler(HTTPException)
@@ -189,10 +246,11 @@ async def http_error(request: Request, exc: HTTPException):
 # ---------------------------------------------------------- device socket
 
 def _device_token(ws: WebSocket) -> str | None:
+    # Header only: tokens in the URL would end up in access logs.
     auth = ws.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return ws.query_params.get("token")
+        return auth[7:].strip() or None
+    return None
 
 
 @app.websocket("/ws/device")

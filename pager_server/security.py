@@ -40,6 +40,10 @@ def new_device_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def new_session_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def hash_token(token: str) -> str:
     # Device tokens are long random strings, so a plain SHA-256 is sufficient.
     return hashlib.sha256(token.encode()).hexdigest()

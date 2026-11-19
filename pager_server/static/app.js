@@ -8,10 +8,11 @@
   const summaryEl = document.getElementById("online-summary");
   const messagesEl = document.getElementById("messages");
 
+  const MAX_LEN = text.maxLength; // from the template's maxlength attribute
   let deviceCount = 0;
 
   function updateCounter() {
-    counter.textContent = `${text.value.length} / ${window.MAX_LEN}`;
+    counter.textContent = `${text.value.length} / ${MAX_LEN}`;
   }
 
   function el(tag, cls, content) {

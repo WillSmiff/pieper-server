@@ -7,8 +7,10 @@ sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
   online/offline status, and recent pages with how many devices received each one.
 - **Devices**: each pager has its own secret token and holds one WebSocket connection to the
   server. Pages are pushed to it right away. If a device was offline, it catches up with `sync`.
-- **Storage**: SQLite in `data/`. Passwords are hashed with scrypt, and device tokens are stored
-  only as SHA-256 hashes.
+- **Storage**: SQLite in `data/`. Passwords are hashed with scrypt, and device tokens and login
+  session tokens are stored only as SHA-256 hashes.
+- **Sessions** are stored server-side and expire after 7 days. Logging out, changing a password
+  or deleting a user ends them immediately. Pages older than 90 days are deleted automatically.
 
 ## Setup
 
@@ -24,7 +26,8 @@ Create users and devices:
 python manage.py add-user alice          # prompts for a password (min 8 chars)
 python manage.py add-device pager-01     # prints the device token ONCE – put it in the firmware
 python manage.py users | devices
-python manage.py passwd alice | del-user alice
+python manage.py passwd alice | del-user alice   # both also end alice's sessions
+python manage.py logout alice                    # end all of alice's web sessions
 python manage.py rotate-device pager-01 | del-device pager-01
 ```
 
@@ -51,35 +54,42 @@ python tools/fake_device.py ws://localhost:8000/ws/device <token>
 | `PAGER_SECRET_KEY` | auto-generated in `data/secret_key` | Signs session cookies |
 | `PAGER_COOKIE_SECURE` | `0` | Set to `1` when served over HTTPS |
 | `PAGER_MAX_MESSAGE_LENGTH` | `200` | Max characters per page |
-| `PAGER_SESSION_MAX_AGE` | `604800` | Login lifetime in seconds |
-| `PAGER_LOGIN_MAX_FAILURES` / `PAGER_LOGIN_WINDOW_SECONDS` | `10` / `900` | Login throttling per IP |
+| `PAGER_SESSION_MAX_AGE` | `604800` | Login lifetime in seconds (absolute, not extended by activity) |
+| `PAGER_LOGIN_MAX_FAILURES` / `PAGER_LOGIN_WINDOW_SECONDS` | `10` / `900` | Failed logins allowed per IP per window |
+| `PAGER_LOGIN_MAX_FAILURES_PER_USER` | `20` | Failed logins allowed per username per window |
+| `PAGER_RETENTION_DAYS` | `90` | Delete pages older than this (`0` = keep forever) |
 | `PAGER_SYNC_LIMIT` | `20` | Max missed pages returned per `sync` |
 
 ## Deploying with HTTPS
 
-Ready-made files for an Ubuntu VPS are in [`deploy/`](deploy/): a systemd unit
-(`pager.service`, code in `/opt/pager`, data in `/var/lib/pager`) and a `Caddyfile`.
+Ready-made files for an Ubuntu VPS are in [`deploy/`](deploy/):
 
-Put a reverse proxy such as Caddy in front of the server. It handles TLS certificates
-automatically and forwards WebSockets without extra configuration:
+- `pager.service`: a sandboxed systemd unit (code in `/opt/pager`, data in `/var/lib/pager`)
+- `Caddyfile`: HTTPS, security headers (HSTS, CSP, …), a request size limit, and a `www` redirect
+- `pager-backup`: a daily database backup for `/etc/cron.daily`, keeping 14 days
 
+Caddy handles TLS certificates automatically and forwards WebSockets without extra
+configuration. Devices connect to `wss://<domain>/ws/device`. Without TLS, passwords and device
+tokens travel in plain text.
+
+Deploying an update on the VPS:
+
+```bash
+cd /opt/pager && sudo -u pager git pull && sudo -u pager .venv/bin/pip install -r requirements.txt
+sudo cp deploy/pager.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart pager
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 ```
-pager.example.com {
-    reverse_proxy 127.0.0.1:8000
-}
-```
 
-Then set `PAGER_COOKIE_SECURE=1`, and have the devices connect to
-`wss://pager.example.com/ws/device`. Without TLS, passwords and device tokens travel in plain text.
+When using `manage.py` on the VPS, always set `PAGER_DATA_DIR=/var/lib/pager`. It prints which
+database it uses, so a mistake is easy to spot.
 
 ## Device protocol
 
-Connect a WebSocket to `/ws/device` and authenticate with either:
+Connect a WebSocket to `/ws/device` and authenticate with the header
+`Authorization: Bearer <token>`. Tokens in the URL are not accepted, because URLs end up in logs.
+Incoming frames are limited to 64 KB.
 
-- header `Authorization: Bearer <token>` (preferred), or
-- query string `/ws/device?token=<token>`
-
-A bad token is rejected during the handshake with HTTP 403. All frames are JSON text.
+A missing or bad token is rejected during the handshake with HTTP 403. All frames are JSON text.
 
 **Server → device**
 
@@ -116,4 +126,4 @@ If the same device connects twice, the server closes the older connection with c
 
 - `POST /api/messages` with `{"text": "..."}` returns `{"id": 42, "sent_to": 3}`
 - `GET /api/status` returns devices (online, last_seen) and the 25 most recent pages with ack counts
-- `GET /healthz` is an unauthenticated liveness check
+- `GET /healthz` is an unauthenticated liveness check that returns `{"ok": true}`

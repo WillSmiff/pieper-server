@@ -3,6 +3,7 @@
     python manage.py add-user alice
     python manage.py passwd alice
     python manage.py del-user alice
+    python manage.py logout alice             # end all of alice's web sessions
     python manage.py users
     python manage.py add-device pager-01      # prints the device token once
     python manage.py rotate-device pager-01   # issue a new token
@@ -15,7 +16,7 @@ import getpass
 import sqlite3
 import sys
 
-from pager_server import db
+from pager_server import config, db
 
 
 def ask_password() -> str:
@@ -38,7 +39,7 @@ def print_token(name: str, token: str) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description="Pager server administration")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for cmd in ("add-user", "passwd", "del-user"):
+    for cmd in ("add-user", "passwd", "del-user", "logout"):
         sub.add_parser(cmd).add_argument("username")
     sub.add_parser("users")
     for cmd in ("add-device", "rotate-device", "del-device"):
@@ -46,6 +47,7 @@ def main() -> int:
     sub.add_parser("devices")
     args = p.parse_args()
 
+    print(f"Database: {config.DB_PATH}  (set PAGER_DATA_DIR to change)", file=sys.stderr)
     db.init()
 
     if args.cmd == "add-user":
@@ -59,7 +61,10 @@ def main() -> int:
             print(f"No such user '{args.username}'.", file=sys.stderr)
             return 1
         db.set_password(args.username, ask_password())
-        print("Password updated.")
+        print("Password updated; existing sessions were ended.")
+    elif args.cmd == "logout":
+        n = db.delete_user_sessions(args.username)
+        print(f"Ended {n} session(s) for '{args.username}'.")
     elif args.cmd == "del-user":
         if not db.delete_user(args.username):
             print(f"No such user '{args.username}'.", file=sys.stderr)

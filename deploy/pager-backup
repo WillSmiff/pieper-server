@@ -1,0 +1,20 @@
+#!/bin/sh
+# Daily backup of the pager database and secret key; keeps 14 days.
+# Install: sudo install -m 0755 deploy/pager-backup /etc/cron.daily/pager-backup
+# (cron.daily skips files with a dot in the name, so keep this name.)
+# Copy /var/backups/pager off the server now and then; a backup on the same VPS
+# doesn't help if the VPS itself is lost.
+set -eu
+
+SRC=/var/lib/pager
+DEST=/var/backups/pager
+
+umask 077
+mkdir -p "$DEST"
+chmod 700 "$DEST"
+
+# .backup takes a consistent copy even while the server is writing.
+sqlite3 "$SRC/pager.db" ".backup '$DEST/pager-$(date +%F).db'"
+cp "$SRC/secret_key" "$DEST/secret_key"
+
+find "$DEST" -name 'pager-*.db' -mtime +14 -delete

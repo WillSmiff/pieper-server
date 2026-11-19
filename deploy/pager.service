@@ -1,5 +1,6 @@
 # systemd unit for the pager server.
-# Install: sudo cp deploy/pager.service /etc/systemd/system/ && sudo systemctl enable --now pager
+# Install: sudo cp deploy/pager.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart pager
+# Check sandboxing: sudo systemd-analyze security pager
 [Unit]
 Description=Pager server
 After=network-online.target
@@ -15,20 +16,45 @@ Environment=PAGER_COOKIE_SECURE=1
 # --proxy-headers makes the real client IP visible (used for login throttling).
 ExecStart=/opt/pager/.venv/bin/uvicorn pager_server.main:app \
     --host 127.0.0.1 --port 8000 --workers 1 \
-    --proxy-headers --forwarded-allow-ips 127.0.0.1
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --no-server-header --ws-max-size 65536
 Restart=always
 RestartSec=3
 
-# Hardening
+# ---- Sandboxing ------------------------------------------------------------
+# New files (database, secret key) readable by the pager user only.
+UMask=0077
 NoNewPrivileges=true
-PrivateTmp=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Filesystem: everything read-only except the data directory.
 ProtectSystem=strict
-ProtectHome=true
 ReadWritePaths=/var/lib/pager
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+# Kernel and system settings are off limits.
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# Only IPv4/IPv6/Unix sockets; no namespaces, realtime, SUID or personality changes.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
 RestrictSUIDSGID=true
+LockPersonality=true
+# If the service fails to start after an upgrade, try removing this line first.
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

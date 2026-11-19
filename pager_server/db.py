@@ -2,10 +2,10 @@
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import config
-from .security import hash_password, hash_token, new_device_token
+from .security import hash_password, hash_token, new_device_token, new_session_token
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS messages (
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS acks (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -36,8 +43,10 @@ CREATE TABLE IF NOT EXISTS acks (
 """
 
 
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def now(offset_seconds: float = 0) -> str:
+    """UTC timestamp as ISO text; same format everywhere so strings compare correctly."""
+    t = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    return t.isoformat(timespec="seconds")
 
 
 @contextmanager
@@ -69,10 +78,15 @@ def add_user(username: str, password: str) -> None:
 
 
 def set_password(username: str, password: str) -> bool:
+    """Change a password and end all of that user's existing sessions."""
     with connect() as conn:
         cur = conn.execute(
             "UPDATE users SET password_hash = ? WHERE username = ?",
             (hash_password(password), username),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
+            (username,),
         )
         return cur.rowcount > 0
 
@@ -90,6 +104,57 @@ def get_user(username: str):
 def list_users():
     with connect() as conn:
         return conn.execute("SELECT username, created_at FROM users ORDER BY username").fetchall()
+
+
+# ------------------------------------------------------------- sessions
+
+def create_session(user_id: int) -> str:
+    """Start a login session; returns the token to put in the (signed) cookie."""
+    token = new_session_token()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (hash_token(token), user_id, now(), now(config.SESSION_MAX_AGE)),
+        )
+    return token
+
+
+def session_user(token: str) -> str | None:
+    """Username for a valid, unexpired session token, else None."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT u.username FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = ? AND s.expires_at > ?",
+            (hash_token(token), now()),
+        ).fetchone()
+    return row["username"] if row else None
+
+
+def delete_session(token: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(token),))
+
+
+def delete_user_sessions(username: str) -> int:
+    with connect() as conn:
+        return conn.execute(
+            "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
+            (username,),
+        ).rowcount
+
+
+# ----------------------------------------------------------- housekeeping
+
+def purge_expired(retention_days: int) -> tuple[int, int]:
+    """Delete expired sessions and (if retention_days > 0) old pages."""
+    with connect() as conn:
+        sessions = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now(),)).rowcount
+        pages = 0
+        if retention_days > 0:
+            pages = conn.execute(
+                "DELETE FROM messages WHERE created_at < ?", (now(-retention_days * 86400),)
+            ).rowcount
+    return sessions, pages
 
 
 # -------------------------------------------------------------- devices
