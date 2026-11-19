@@ -1,6 +1,8 @@
 """Pager server: web UI for sending pages + WebSocket endpoint for pager devices."""
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import re
@@ -120,14 +122,43 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def page_payload(msg: dict) -> dict:
+def drawing_json(image: bytes) -> dict:
     return {
+        "width": config.DRAWING_WIDTH,
+        "height": config.DRAWING_HEIGHT,
+        "format": "1bpp",
+        "data": base64.b64encode(image).decode(),
+    }
+
+
+def page_payload(msg: dict) -> dict:
+    payload = {
         "type": "page",
         "id": msg["id"],
         "from": msg["sender"],
-        "text": msg["body"],
+        "text": msg["body"],  # for a drawing: the optional caption
         "ts": msg["created_at"],
+        "kind": "drawing" if msg.get("image") else "text",
     }
+    if msg.get("image"):
+        payload["image"] = drawing_json(msg["image"])
+    return payload
+
+
+def decode_drawing(data: str) -> bytes:
+    """Validate a base64 1-bit drawing from the web UI; returns the raw bitmap."""
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Drawing is not valid base64")
+    if len(raw) != config.DRAWING_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Drawing must be {config.DRAWING_WIDTH}x{config.DRAWING_HEIGHT} pixels, 1 bit each",
+        )
+    if not any(raw):
+        raise HTTPException(status_code=400, detail="Drawing is empty")
+    return raw
 
 
 def start_session(request: Request, user) -> None:
@@ -166,7 +197,12 @@ async def index(request: Request):
         return RedirectResponse("/login", status_code=303)
     if ctx.setup_required:
         return RedirectResponse("/account", status_code=303)
-    return page(request, "index.html", ctx, max_len=config.MAX_MESSAGE_LENGTH)
+    return page(
+        request, "index.html", ctx,
+        max_len=config.MAX_MESSAGE_LENGTH,
+        drawing_width=config.DRAWING_WIDTH,
+        drawing_height=config.DRAWING_HEIGHT,
+    )
 
 
 @app.get("/login")
@@ -346,7 +382,8 @@ async def disable_2fa(request: Request, password: str = Form(...), code: str = F
 # ---------------------------------------------------------------- JSON API
 
 class PageIn(BaseModel):
-    text: str
+    text: str = ""
+    drawing: str | None = None  # base64, see config.DRAWING_*
 
 
 class ReauthIn(BaseModel):
@@ -357,15 +394,17 @@ class ReauthIn(BaseModel):
 @app.post("/api/messages")
 async def send_page(body: PageIn, ctx: Ctx = Depends(require_user)):
     text = clean_text(body.text)
-    if not text:
+    image = decode_drawing(body.drawing) if body.drawing else None
+    if not text and image is None:
         raise HTTPException(status_code=400, detail="Message is empty")
     if len(text) > config.MAX_MESSAGE_LENGTH:
         raise HTTPException(
             status_code=400, detail=f"Message exceeds {config.MAX_MESSAGE_LENGTH} characters"
         )
-    msg = db.add_message(ctx.username, text)
+    msg = db.add_message(ctx.username, text, image)
     delivered = await hub.broadcast(page_payload(msg))
-    log.info("page #%s from %s sent to %d device(s)", msg["id"], ctx.username, delivered)
+    log.info("%s #%s from %s sent to %d device(s)",
+             "drawing" if image else "page", msg["id"], ctx.username, delivered)
     return {"id": msg["id"], "sent_to": delivered}
 
 
@@ -377,7 +416,16 @@ async def status(ctx: Ctx = Depends(require_user)):
         for d in db.list_devices()
     ]
     messages = [dict(m) for m in db.recent_messages(25)]
-    return {"devices": devices, "messages": messages, "device_count": len(devices)}
+    return {"devices": devices, "messages": messages, "device_count": len(devices),
+            "drawing": {"width": config.DRAWING_WIDTH, "height": config.DRAWING_HEIGHT}}
+
+
+@app.get("/api/messages/{message_id}/image")
+async def page_image(message_id: int, ctx: Ctx = Depends(require_user)):
+    image = db.message_image(message_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="No drawing for this page")
+    return drawing_json(image)
 
 
 @app.post("/api/reauth")
@@ -431,6 +479,7 @@ async def device_socket(ws: WebSocket):
             "type": "welcome",
             "device": name,
             "max_length": config.MAX_MESSAGE_LENGTH,
+            "drawing": {"width": config.DRAWING_WIDTH, "height": config.DRAWING_HEIGHT, "format": "1bpp"},
             "server_time": db.now(),
         })
         while True:

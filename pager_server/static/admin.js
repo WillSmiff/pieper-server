@@ -259,8 +259,10 @@
   function renderHistory(messages, deviceCount) {
     replaceRows("history", messages.map((m) => {
       const tr = el("tr");
+      const body = el("td", "body", m.body);
+      if (m.has_image) body.prepend(window.PagerDrawing.thumbnail(m.id));
       tr.append(el("td", "muted", m.id), el("td", "muted", fmtTime(m.created_at)),
-        el("td", null, m.sender), el("td", "body", m.body), el("td", null, `${m.acks}/${deviceCount}`));
+        el("td", null, m.sender), body, el("td", null, `${m.acks}/${deviceCount}`));
       return tr;
     }), "No pages sent yet.", 5);
   }

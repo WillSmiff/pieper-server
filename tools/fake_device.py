@@ -7,10 +7,29 @@ prints each page, acks it, and reconnects with backoff if the link drops.
 """
 
 import asyncio
+import base64
 import json
 import sys
 
 import websockets
+
+
+def ascii_art(image: dict) -> str:
+    """Render a 1bpp drawing in the terminal, 2x4 pixels per character."""
+    w, h = image["width"], image["height"]
+    data = base64.b64decode(image["data"])
+    stride = (w + 7) // 8
+
+    def ink(x: int, y: int) -> bool:
+        return x < w and y < h and bool(data[y * stride + x // 8] & (0x80 >> (x % 8)))
+
+    rows = []
+    for y in range(0, h, 4):
+        rows.append("".join(
+            "#" if any(ink(x + dx, y + dy) for dx in range(2) for dy in range(4)) else "."
+            for x in range(0, w, 2)
+        ))
+    return "\n".join(rows)
 
 
 async def run(url: str, token: str) -> None:
@@ -31,7 +50,12 @@ async def run(url: str, token: str) -> None:
                         if msg["id"] <= last_id:
                             continue
                         last_id = msg["id"]
-                        print(f"\n*** PAGE #{msg['id']} from {msg['from']} at {msg['ts']}\n{msg['text']}\n")
+                        print(f"\n*** PAGE #{msg['id']} from {msg['from']} at {msg['ts']}")
+                        if msg.get("image"):
+                            print(ascii_art(msg["image"]))
+                        if msg["text"]:
+                            print(msg["text"])
+                        print()
                         await ws.send(json.dumps({"type": "ack", "id": msg["id"]}))
                     else:
                         print(f"[{msg}]")

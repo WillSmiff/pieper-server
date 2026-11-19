@@ -5,6 +5,9 @@ sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
 
 - **Web UI**: username/password login, a compose box with a character counter, live device
   online/offline status, and recent pages with how many devices received each one.
+- **Drawings**: the **Drawing** tab has a 320×170 black-and-white drawing pad (pen, eraser, brush
+  sizes, undo), the size of the T-Display S3 screen. A drawing is sent as a 1-bit bitmap, with an
+  optional caption.
 - **Devices**: each pager has its own secret token and holds one WebSocket connection to the
   server. Pages are pushed to it right away. If a device was offline, it catches up with `sync`.
 - **Storage**: SQLite in `data/`. Passwords are hashed with scrypt, and device tokens and login
@@ -143,13 +146,30 @@ A missing or bad token is rejected during the handshake with HTTP 403. All frame
 **Server → device**
 
 ```json
-{"type": "welcome", "device": "pager-01", "max_length": 200, "server_time": "2026-11-16T11:33:11+00:00"}
-{"type": "page", "id": 42, "from": "alice", "text": "Meeting in 5 min\nRoom 2", "ts": "2026-11-16T11:33:11+00:00"}
+{"type": "welcome", "device": "pager-01", "max_length": 200,
+ "drawing": {"width": 320, "height": 170, "format": "1bpp"}, "server_time": "2026-11-16T11:33:11+00:00"}
+{"type": "page", "id": 42, "kind": "text", "from": "alice", "text": "Meeting in 5 min\nRoom 2", "ts": "2026-11-16T11:33:11+00:00"}
+{"type": "page", "id": 43, "kind": "drawing", "from": "alice", "text": "optional caption", "ts": "...",
+ "image": {"width": 320, "height": 170, "format": "1bpp", "data": "<base64, 6800 bytes decoded>"}}
 {"type": "pong", "server_time": "..."}
 {"type": "error", "error": "..."}
 ```
 
 `text` is UTF-8 and may contain `\n`. Other control characters are stripped. Timestamps are in UTC.
+For a drawing, `text` is the caption and may be empty.
+
+**Drawings** are 1 bit per pixel, 320×170, rows top to bottom. Each row is packed most significant
+bit first (the leftmost pixel is bit 7 of the first byte) and padded to whole bytes (40 bytes per
+row). A set bit is ink. This is exactly the format of Adafruit-GFX / TFT_eSPI `drawBitmap`, so on
+the T-Display S3 (landscape, `setRotation(1)`), after base64-decoding `image.data`:
+
+```cpp
+tft.fillScreen(TFT_WHITE);
+tft.drawBitmap(0, 0, bitmap, 320, 170, TFT_BLACK);   // or swap colours for white-on-black
+```
+
+A drawing page is about 9 KB of JSON, so give the WebSocket client a receive buffer of at least
+16 KB. A `sync` can send up to 20 pages back to back.
 
 **Device → server**
 
@@ -173,6 +193,10 @@ If the same device connects twice, the server closes the older connection with c
 
 ## HTTP API (for the web UI, needs a session cookie)
 
-- `POST /api/messages` with `{"text": "..."}` returns `{"id": 42, "sent_to": 3}`
-- `GET /api/status` returns devices (online, last_seen) and the 25 most recent pages with ack counts
+- `POST /api/messages` with `{"text": "..."}` returns `{"id": 42, "sent_to": 3}`. For a drawing,
+  send `{"text": "<optional caption>", "drawing": "<base64 bitmap>"}` (format as above; an empty
+  drawing is rejected).
+- `GET /api/status` returns devices (online, last_seen) and the 25 most recent pages with ack
+  counts. Drawing pages have `has_image: true`.
+- `GET /api/messages/{id}/image` returns a page's drawing as `{"width", "height", "format", "data"}`
 - `GET /healthz` is an unauthenticated liveness check that returns `{"ok": true}`

@@ -1,12 +1,46 @@
 {% extends "base.html" %}
 {% block content %}
     <section class="card">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tab-text" aria-selected="true" aria-controls="panel-text">Text</button>
+        <button type="button" role="tab" id="tab-drawing" aria-selected="false" aria-controls="panel-drawing">Drawing</button>
+      </div>
       <form id="compose">
-        <label for="text">Message</label>
-        <textarea id="text" maxlength="{{ max_len }}" rows="4"
-                  placeholder="Type a page… (Ctrl+Enter to send)" required></textarea>
-        <div class="row">
+        <div id="panel-text" role="tabpanel" aria-labelledby="tab-text">
+          <label for="text">Message</label>
+          <textarea id="text" maxlength="{{ max_len }}" rows="4"
+                    placeholder="Type a page… (Ctrl+Enter to send)"></textarea>
           <span id="counter" class="muted">0 / {{ max_len }}</span>
+        </div>
+        <div id="panel-drawing" role="tabpanel" aria-labelledby="tab-drawing" class="hidden">
+          <div class="toolbar">
+            <span class="segmented" role="group" aria-label="Tool">
+              <button type="button" class="small secondary" id="tool-pen" aria-pressed="true">Pen</button>
+              <button type="button" class="small secondary" id="tool-eraser" aria-pressed="false">Eraser</button>
+            </span>
+            <label class="size">Size
+              <select id="brush-size">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="8">8</option>
+                <option value="14">14</option>
+              </select>
+            </label>
+            <span class="pad-actions">
+              <button type="button" class="small secondary" id="undo" disabled>Undo</button>
+              <button type="button" class="small danger" id="clear-pad">Clear</button>
+            </span>
+          </div>
+          <canvas id="pad" width="{{ drawing_width }}" height="{{ drawing_height }}"
+                  role="img" aria-label="Drawing pad, {{ drawing_width }} by {{ drawing_height }} pixels"></canvas>
+          <label for="caption" class="caption">Caption <span class="muted">(optional)</span>
+            <input id="caption" maxlength="{{ max_len }}" autocomplete="off" placeholder="Shown in the notification">
+          </label>
+        </div>
+        <div class="row">
+          <span class="muted small" id="hint"></span>
           <button type="submit" id="send">Send to all pagers</button>
         </div>
         <p id="feedback" role="status"></p>
@@ -23,4 +57,5 @@
       <ul id="messages" class="messages"><li class="muted">Loading…</li></ul>
     </section>
 {% endblock %}
-{% block scripts %}<script src="/static/app.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/drawing.js"></script>
+<script src="/static/app.js"></script>{% endblock %}

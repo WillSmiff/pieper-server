@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY,
     sender     TEXT NOT NULL,
     body       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    image      BLOB
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash   TEXT PRIMARY KEY,
@@ -72,6 +73,7 @@ MIGRATIONS = {
         ("totp_last_step", "INTEGER"),
     ],
     "sessions": [("auth_at", "TEXT"), ("totp_pending", "TEXT")],
+    "messages": [("image", "BLOB")],  # 1-bit drawing, see config.DRAWING_*
 }
 
 AUDIT_RETENTION_DAYS = 365
@@ -383,7 +385,7 @@ def list_devices():
 
 # ------------------------------------------------------------- messages
 
-def add_message(sender: str, body: str) -> dict:
+def add_message(sender: str, body: str, image: bytes | None = None) -> dict:
     created = now()
     with connect() as conn:
         # Next id = 1 + highest id ever issued, even if those pages were deleted since.
@@ -391,15 +393,15 @@ def add_message(sender: str, body: str) -> dict:
         highest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
         new_id = max(last["value"] if last else 0, highest) + 1
         conn.execute(
-            "INSERT INTO messages (id, sender, body, created_at) VALUES (?, ?, ?, ?)",
-            (new_id, sender, body, created),
+            "INSERT INTO messages (id, sender, body, created_at, image) VALUES (?, ?, ?, ?, ?)",
+            (new_id, sender, body, created, image),
         )
         conn.execute(
             "INSERT INTO counters (name, value) VALUES ('message_id', ?) "
             "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             (new_id,),
         )
-        return {"id": new_id, "sender": sender, "body": body, "created_at": created}
+        return {"id": new_id, "sender": sender, "body": body, "created_at": created, "image": image}
 
 
 def wipe_messages() -> int:
@@ -420,7 +422,7 @@ def recent_messages(limit: int = 25):
     with connect() as conn:
         return conn.execute(
             """
-            SELECT m.id, m.sender, m.body, m.created_at,
+            SELECT m.id, m.sender, m.body, m.created_at, m.image IS NOT NULL AS has_image,
                    (SELECT COUNT(*) FROM acks a WHERE a.message_id = m.id) AS acks
             FROM messages m ORDER BY m.id DESC LIMIT ?
             """,
@@ -432,11 +434,17 @@ def messages_since(message_id: int, limit: int):
     """The newest `limit` messages with id > message_id, oldest first."""
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, sender, body, created_at FROM messages WHERE id > ? "
+            "SELECT id, sender, body, created_at, image FROM messages WHERE id > ? "
             "ORDER BY id DESC LIMIT ?",
             (message_id, limit),
         ).fetchall()
     return list(reversed(rows))
+
+
+def message_image(message_id: int) -> bytes | None:
+    with connect() as conn:
+        row = conn.execute("SELECT image FROM messages WHERE id = ?", (message_id,)).fetchone()
+    return row["image"] if row else None
 
 
 def record_ack(message_id: int, device_id: int) -> None:

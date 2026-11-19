@@ -41,6 +41,13 @@ LOGIN_WINDOW_SECONDS = int(os.environ.get("PAGER_LOGIN_WINDOW_SECONDS", "900"))
 # Pages older than this are deleted (0 = keep forever).
 RETENTION_DAYS = int(os.environ.get("PAGER_RETENTION_DAYS", "90"))
 
+# Drawings: 1 bit per pixel, sized for the T-Display S3 screen (landscape).
+# Rows are packed MSB-first and padded to whole bytes (the Adafruit-GFX /
+# TFT_eSPI drawBitmap format), so a device can draw one with a single call.
+DRAWING_WIDTH = 320
+DRAWING_HEIGHT = 170
+DRAWING_BYTES = (DRAWING_WIDTH + 7) // 8 * DRAWING_HEIGHT
+
 # How many missed messages a device can fetch with a "sync" request.
 SYNC_LIMIT = int(os.environ.get("PAGER_SYNC_LIMIT", "20"))
 
