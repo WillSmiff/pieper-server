@@ -20,7 +20,7 @@ sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
 - **Admin backoffice** (`/admin`): manage users, devices and sessions, see the page history and an
   audit log of all admin actions. See [Admin backoffice](#admin-backoffice).
 - **Phone line** (optional): call a phone number, enter a PIN and press a key to send one of nine
-  preset pages. Runs through Asterisk and a SIP trunk on the same VPS. See
+  preset pages, or type digits to send a numeric page. Runs through Asterisk and a SIP trunk on the same VPS. See
   [Phone line](#phone-line-asterisk--sip-trunk).
 
 ## Setup
@@ -141,8 +141,10 @@ database it uses, so a mistake is easy to spot.
 ## Phone line (Asterisk + SIP trunk)
 
 Callers can send one of up to nine **preset pages** by phone: they call the number, enter the
-phone PIN followed by `#`, press the preset key, hear it read back, and press `1` to send. Pages
-arrive as sent by "phone line". Presets and the PIN are managed on the admin page (**Phone line**
+phone PIN followed by `#`, press the preset key, hear it read back, and press `1` to send.
+Instead of a preset key, they can press `*`, type up to 20 digits and end with `#` to send a
+**numeric page**: just those digits, for example a number to call back. Pages arrive as sent by
+"phone line". Presets and the PIN are managed on the admin page (**Phone line**
 section). Every phone page, and every wrong PIN, is in the audit log with the caller's number.
 
 How it fits together: the SIP provider sends calls to Asterisk on the VPS. The dialplan

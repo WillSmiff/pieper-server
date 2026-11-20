@@ -2,7 +2,8 @@
 
 Asterisk (on the same VPS) answers calls from the SIP trunk, asks for the
 phone PIN and a preset digit, and calls POST /internal/phone/page through the
-AGI script in deploy/asterisk/. That endpoint is protected by:
+AGI script in deploy/asterisk/. Instead of a preset, a caller can press * and type
+digits to send those digits as the page ("numeric page"). That endpoint is protected by:
 
   - a service token (Authorization: Bearer ...), only known to Asterisk;
   - loopback only: requests that came through Caddy are refused (Caddy also
@@ -27,6 +28,7 @@ TOKEN_SETTING = "phone_token_hash"
 THROTTLE_KEY = "phone"
 SENDER = "phone line"  # contains a space, so it can never be mistaken for a username
 PIN_RE = re.compile(r"^[0-9]{%d,12}$" % config.PHONE_PIN_MIN_LENGTH)
+NUMBER_RE = re.compile(r"^[0-9]{1,%d}$" % config.PHONE_NUMBER_MAX_LENGTH)
 
 
 def valid_pin(pin: str) -> bool:
@@ -43,7 +45,8 @@ def enabled() -> bool:
 
 class PhoneIn(BaseModel):
     pin: str
-    preset: int | None = None  # omit to only check the PIN
+    preset: int | None = None  # send this preset page...
+    number: str | None = None  # ...or a numeric page with these digits; omit both to only check the PIN
     caller: str = ""
 
 
@@ -74,6 +77,14 @@ async def phone_page(body: PhoneIn, request: Request):
         record_failure(THROTTLE_KEY)
         db.audit(SENDER, "phone_pin_failed", None, f"caller {caller}")
         return _result(403, "bad_pin")
+
+    if body.number is not None:
+        if body.preset is not None or not NUMBER_RE.fullmatch(body.number):
+            return _result(400, "bad_number")
+        clear_failures(THROTTLE_KEY)
+        page_id, delivered = await paging.send(SENDER, body.number)
+        db.audit(SENDER, "phone_number_sent", body.number, f"caller {caller}, page #{page_id}")
+        return {"result": "ok", "id": page_id, "sent_to": delivered}
 
     if body.preset is None:
         return _result(200, "pin_ok")

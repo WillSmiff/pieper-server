@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Asterisk AGI script: passes a phone caller's PIN and preset choice to the pager server.
 
-Called from extensions.conf as AGI(/usr/local/lib/pager/pager-agi.py,check|send).
-Reads the channel variables PIN, PRESET and CALLERID(num) (not passed as arguments, so the
-PIN doesn't appear in Asterisk's command logging), POSTs them to the pager server on
-127.0.0.1, and sets PAGER_RESULT to one of:
+Called from extensions.conf as AGI(/usr/local/lib/pager/pager-agi.py,check|send|number).
+Reads the channel variables PIN, PRESET (send), NUMBER (number) and CALLERID(num) (not
+passed as arguments, so the PIN doesn't appear in Asterisk's command logging), POSTs them
+to the pager server on 127.0.0.1, and sets PAGER_RESULT to one of:
 
     pin_ok     (check) PIN is correct
-    ok         (send)  page sent
+    ok         (send/number) page sent
     bad_pin    wrong PIN
     no_preset  nothing configured on that key
+    bad_number the typed number isn't 1-20 digits
     locked     too many wrong PINs recently; phone paging is paused
     disabled   no phone PIN set on the server
     error      anything else (server down, bad token, ...)
@@ -95,11 +96,17 @@ def main() -> None:
             set_result("no_preset")
             return
         payload["preset"] = int(preset)
+    elif mode == "number":
+        number = get_var("${NUMBER}")
+        if not number.isdigit():
+            set_result("bad_number")
+            return
+        payload["number"] = number
     elif mode != "check":
         set_result("error")
         return
     result = call_server(payload)
-    known = {"pin_ok", "ok", "bad_pin", "no_preset", "locked", "disabled"}
+    known = {"pin_ok", "ok", "bad_pin", "no_preset", "bad_number", "locked", "disabled"}
     set_result(result if result in known else "error")
 
 
