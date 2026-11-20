@@ -245,6 +245,67 @@
     });
   };
 
+  // --------------------------------------------------------- phone line
+
+  function renderPhone(p) {
+    const state = $("phone-state");
+    if (!p.token_set) {
+      state.textContent = "Not connected: run manage.py phone-token on the server";
+      state.className = "warn small";
+    } else if (!p.pin_set) {
+      state.textContent = "Off: set a PIN to turn it on";
+      state.className = "warn small";
+    } else {
+      state.textContent = "On";
+      state.className = "ok small";
+    }
+    $("phone-off").classList.toggle("hidden", !p.pin_set);
+    $("phone-pin").pin.pattern = `[0-9]{${p.pin_min_length},12}`;
+    $("phone-pin").pin.placeholder = `${p.pin_min_length}-12 digits`;
+    $("add-preset").text.maxLength = p.max_length;
+
+    replaceRows("presets", p.presets.map((pr) => {
+      const tr = el("tr");
+      tr.append(el("td", null, pr.digit), el("td", "body", pr.body));
+      const actions = el("td", "actions");
+      actions.append(button("Edit", "secondary", () => {
+        const form = $("add-preset");
+        form.digit.value = String(pr.digit);
+        form.text.value = pr.body;
+        form.text.focus();
+      }));
+      actions.append(button("Delete", "danger", () => act(
+        `Delete preset ${pr.digit}? Callers pressing ${pr.digit} will hear an error.`,
+        async () => { await api("DELETE", `/api/admin/phone/presets/${pr.digit}`); return `Deleted preset ${pr.digit}.`; })));
+      tr.append(actions);
+      return tr;
+    }), "No presets yet.", 3);
+  }
+
+  $("add-preset").onsubmit = (e) => {
+    e.preventDefault();
+    const form = e.target;
+    act(null, async () => {
+      const r = await api("PUT", `/api/admin/phone/presets/${form.digit.value}`, { text: form.text.value });
+      form.text.value = "";
+      return `Saved preset ${r.digit}.`;
+    });
+  };
+
+  $("phone-pin").onsubmit = (e) => {
+    e.preventDefault();
+    const form = e.target;
+    act(null, async () => {
+      await api("PUT", "/api/admin/phone/pin", { pin: form.pin.value });
+      form.reset();
+      return "Phone PIN set. Share it only with people who may page by phone.";
+    });
+  };
+
+  $("phone-off").onclick = () => act(
+    "Turn off phone paging? The PIN is removed; set a new one to turn it back on.",
+    async () => { await api("DELETE", "/api/admin/phone/pin"); return "Phone paging is off."; });
+
   // ------------------------------------------------------ audit/history
 
   function renderAudit(entries) {
@@ -276,15 +337,17 @@
 
   async function loadAll() {
     try {
-      const [users, devices, audit, history] = await Promise.all([
+      const [users, devices, audit, history, phone] = await Promise.all([
         api("GET", "/api/admin/users"),
         api("GET", "/api/admin/devices"),
         api("GET", "/api/admin/audit"),
         api("GET", "/api/admin/messages"),
+        api("GET", "/api/admin/phone"),
       ]);
       me = users.me;
       renderUsers(users.users);
       renderDevices(devices.devices);
+      renderPhone(phone);
       renderAudit(audit.entries);
       renderHistory(history.messages, devices.devices.length);
     } catch (err) {

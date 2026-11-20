@@ -48,6 +48,11 @@ DRAWING_WIDTH = 320
 DRAWING_HEIGHT = 170
 DRAWING_BYTES = (DRAWING_WIDTH + 7) // 8 * DRAWING_HEIGHT
 
+# Phone line (Asterisk): PIN length, and how many wrong PINs (within
+# LOGIN_WINDOW_SECONDS) lock phone paging until the window has passed.
+PHONE_PIN_MIN_LENGTH = int(os.environ.get("PAGER_PHONE_PIN_MIN_LENGTH", "6"))
+PHONE_MAX_FAILURES = int(os.environ.get("PAGER_PHONE_MAX_FAILURES", "5"))
+
 # How many missed messages a device can fetch with a "sync" request.
 SYNC_LIMIT = int(os.environ.get("PAGER_SYNC_LIMIT", "20"))
 

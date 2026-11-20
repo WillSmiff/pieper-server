@@ -1,4 +1,5 @@
-"""SQLite storage: users, sessions, devices, messages, acknowledgements, audit log."""
+"""SQLite storage: users, sessions, devices, messages, acknowledgements, audit log,
+phone presets and settings."""
 
 import sqlite3
 from contextlib import contextmanager
@@ -61,6 +62,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS counters (
     name  TEXT PRIMARY KEY,
     value INTEGER NOT NULL
+);
+-- Preset pages that can be sent by phone: the caller presses the digit.
+CREATE TABLE IF NOT EXISTS presets (
+    digit      INTEGER PRIMARY KEY CHECK (digit BETWEEN 1 AND 9),
+    body       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- Small key/value store (phone PIN hash, phone service token hash).
+CREATE TABLE IF NOT EXISTS settings (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -454,3 +466,50 @@ def record_ack(message_id: int, device_id: int) -> None:
             "SELECT id, ?, ? FROM messages WHERE id = ?",
             (device_id, now(), message_id),
         )
+
+
+# -------------------------------------------------------------- presets
+
+def list_presets():
+    with connect() as conn:
+        return conn.execute("SELECT digit, body, updated_at FROM presets ORDER BY digit").fetchall()
+
+
+def get_preset(digit: int):
+    with connect() as conn:
+        return conn.execute("SELECT digit, body FROM presets WHERE digit = ?", (digit,)).fetchone()
+
+
+def set_preset(digit: int, body: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO presets (digit, body, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(digit) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
+            (digit, body, now()),
+        )
+
+
+def delete_preset(digit: int) -> bool:
+    with connect() as conn:
+        return conn.execute("DELETE FROM presets WHERE digit = ?", (digit,)).rowcount > 0
+
+
+# ------------------------------------------------------------- settings
+
+def get_setting(name: str) -> str | None:
+    with connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE name = ?", (name,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(name: str, value: str | None) -> None:
+    """Store a setting; None deletes it."""
+    with connect() as conn:
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE name = ?", (name,))
+        else:
+            conn.execute(
+                "INSERT INTO settings (name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                (name, value),
+            )

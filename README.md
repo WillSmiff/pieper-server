@@ -19,6 +19,9 @@ sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
   any authenticator app) on the Account page.
 - **Admin backoffice** (`/admin`): manage users, devices and sessions, see the page history and an
   audit log of all admin actions. See [Admin backoffice](#admin-backoffice).
+- **Phone line** (optional): call a phone number, enter a PIN and press a key to send one of nine
+  preset pages. Runs through Asterisk and a SIP trunk on the same VPS. See
+  [Phone line](#phone-line-asterisk--sip-trunk).
 
 ## Setup
 
@@ -134,6 +137,75 @@ cd /opt/pager && sudo -u pager PAGER_DATA_DIR=/var/lib/pager .venv/bin/python ma
 
 When using `manage.py` on the VPS, always set `PAGER_DATA_DIR=/var/lib/pager`. It prints which
 database it uses, so a mistake is easy to spot.
+
+## Phone line (Asterisk + SIP trunk)
+
+Callers can send one of up to nine **preset pages** by phone: they call the number, enter the
+phone PIN followed by `#`, press the preset key, hear it read back, and press `1` to send. Pages
+arrive as sent by "phone line". Presets and the PIN are managed on the admin page (**Phone line**
+section). Every phone page, and every wrong PIN, is in the audit log with the caller's number.
+
+How it fits together: the SIP provider sends calls to Asterisk on the VPS. The dialplan
+([`deploy/asterisk/extensions.conf`](deploy/asterisk/extensions.conf)) asks for the PIN and
+preset, and the AGI script ([`pager-agi.py`](deploy/asterisk/pager-agi.py)) passes them to the
+pager server at `http://127.0.0.1:8000/internal/phone/page`. That endpoint:
+
+- only accepts requests made directly on the VPS (Caddy also refuses `/internal/*` from outside);
+- needs a service token that only Asterisk has (`manage.py phone-token`);
+- checks the PIN (6–12 digits, stored as a scrypt hash). After 5 wrong PINs within 15 minutes,
+  phone paging pauses until that window has passed.
+
+Nothing in the dialplan can dial out, so the trunk can't be used for toll fraud. Also set a
+low credit limit, or turn off outgoing calls, in your provider's portal.
+
+### Setting it up
+
+1. **Provider.** Get an inbound number with a SIP account from a provider that supports
+   registration. Note the SIP server, username and password, and the provider's signalling and
+   media (RTP) IP addresses. Ask them if they're not listed.
+2. **Install Asterisk** (from Ubuntu's `universe` repository) and the English prompts:
+   ```bash
+   sudo apt install asterisk asterisk-core-sounds-en
+   ```
+3. **Configuration.** Install the files, then fill in the four placeholders (`SIP_SERVER`,
+   `SIP_USERNAME`, `SIP_PASSWORD`, `PROVIDER_IP`) in the *installed* `pjsip.conf`. That way the
+   password never ends up in the git checkout.
+   ```bash
+   cd /opt/pager
+   for f in pjsip extensions rtp modules; do
+     sudo install -m 640 -o root -g asterisk deploy/asterisk/$f.conf /etc/asterisk/$f.conf
+   done
+   sudo install -D -m 755 deploy/asterisk/pager-agi.py /usr/local/lib/pager/pager-agi.py
+   sudo nano /etc/asterisk/pjsip.conf
+   ```
+   When updating later, don't reinstall `pjsip.conf` over your filled-in copy.
+4. **Service token** for Asterisk, written straight into a file that only root and Asterisk can
+   read:
+   ```bash
+   sudo -u pager PAGER_DATA_DIR=/var/lib/pager .venv/bin/python manage.py phone-token \
+     | sudo install -m 640 -o root -g asterisk /dev/stdin /etc/asterisk/pager-token
+   ```
+5. **Firewall:** open SIP and RTP to the provider only. Use the provider's real addresses; media
+   often comes from different IPs than signalling.
+   ```bash
+   sudo ufw allow from <provider-signalling-ip-or-subnet> to any port 5060 proto udp
+   sudo ufw allow from <provider-media-ip-or-subnet> to any port 10000:10099 proto udp
+   ```
+6. **Start** it, and check that the registration works and nothing else is listening:
+   ```bash
+   sudo systemctl restart asterisk
+   sudo asterisk -rx "pjsip show registrations"     # should say "Registered"
+   sudo ss -lntup | grep asterisk                   # expect only UDP 5060 (plus RTP during calls)
+   ```
+7. **Presets and PIN:** on the admin page, add presets under **Phone line** and set the PIN. The
+   section shows "On" when both the token and the PIN are set. Then call the number to test.
+
+After changing `extensions.conf` later, run `sudo asterisk -rx "dialplan reload"`. Use
+`sudo asterisk -rvvv` to watch calls live. The verbose console shows the digits callers type,
+so don't leave a verbose console log running unattended.
+
+`manage.py` also has `phone-pin`, `phone-off` (removes the PIN and turns phone paging off),
+`phone-status` and `phone-token` (a new token; the old one stops working).
 
 ## Device protocol
 

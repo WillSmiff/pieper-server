@@ -5,7 +5,6 @@ import base64
 import binascii
 import json
 import logging
-import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +20,8 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import admin, config, db
+from . import admin, config, db, paging, phone
+from .paging import clean_text, drawing_json, page_payload
 from .auth import (
     Ctx, check_password, clear_failures, client_ip, get_ctx, is_throttled, page,
     password_problem, record_failure, require_user, session_max_age, throttle_keys, verify_totp,
@@ -71,6 +71,7 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 app.include_router(admin.router)
+app.include_router(phone.router)
 
 
 def _same_site_request(request: Request) -> bool:
@@ -101,7 +102,7 @@ async def origin_check_and_no_store(request: Request, call_next):
 
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException):
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith(("/api/", "/internal/")):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
     if exc.status_code == 401:
         return RedirectResponse("/login", status_code=303)
@@ -111,39 +112,6 @@ async def http_error(request: Request, exc: HTTPException):
 
 
 # ------------------------------------------------------------------ helpers
-
-_CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
-
-
-def clean_text(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = _CONTROL_CHARS.sub("", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def drawing_json(image: bytes) -> dict:
-    return {
-        "width": config.DRAWING_WIDTH,
-        "height": config.DRAWING_HEIGHT,
-        "format": "1bpp",
-        "data": base64.b64encode(image).decode(),
-    }
-
-
-def page_payload(msg: dict) -> dict:
-    payload = {
-        "type": "page",
-        "id": msg["id"],
-        "from": msg["sender"],
-        "text": msg["body"],  # for a drawing: the optional caption
-        "ts": msg["created_at"],
-        "kind": "drawing" if msg.get("image") else "text",
-    }
-    if msg.get("image"):
-        payload["image"] = drawing_json(msg["image"])
-    return payload
-
 
 def decode_drawing(data: str) -> bytes:
     """Validate a base64 1-bit drawing from the web UI; returns the raw bitmap."""
@@ -401,11 +369,8 @@ async def send_page(body: PageIn, ctx: Ctx = Depends(require_user)):
         raise HTTPException(
             status_code=400, detail=f"Message exceeds {config.MAX_MESSAGE_LENGTH} characters"
         )
-    msg = db.add_message(ctx.username, text, image)
-    delivered = await hub.broadcast(page_payload(msg))
-    log.info("%s #%s from %s sent to %d device(s)",
-             "drawing" if image else "page", msg["id"], ctx.username, delivered)
-    return {"id": msg["id"], "sent_to": delivered}
+    page_id, delivered = await paging.send(ctx.username, text, image)
+    return {"id": page_id, "sent_to": delivered}
 
 
 @app.get("/api/status")

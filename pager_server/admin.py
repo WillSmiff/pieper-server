@@ -1,4 +1,4 @@
-"""Admin backoffice: manage users, devices and sessions, and read the audit log.
+"""Admin backoffice: manage users, devices, sessions and the phone line, and read the audit log.
 
 Every route in this router requires an admin (router-level dependency, so a new
 route can't accidentally be left open). Every change additionally requires a
@@ -10,10 +10,11 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from . import db
+from . import config, db, phone
 from .auth import Ctx, client_ip, page, require_admin, require_recent_auth
 from .hub import hub
-from .security import new_temp_password, valid_name
+from .paging import clean_text
+from .security import hash_password, new_temp_password, valid_name
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -35,6 +36,14 @@ class RenameIn(BaseModel):
 
 class NewDevice(BaseModel):
     name: str
+
+
+class PresetIn(BaseModel):
+    text: str
+
+
+class PinIn(BaseModel):
+    pin: str
 
 
 def _target_user(ctx: Ctx, username: str):
@@ -223,3 +232,60 @@ async def wipe_history(request: Request, ctx: Ctx = Depends(require_recent_auth)
 @router.get("/api/admin/audit")
 async def audit_log(limit: int = 200, ctx: Ctx = Depends(require_admin)):
     return {"entries": [dict(e) for e in db.recent_audit(max(1, min(limit, 1000)))]}
+
+
+# ------------------------------------------------------------- phone line
+
+@router.get("/api/admin/phone")
+async def phone_settings(ctx: Ctx = Depends(require_admin)):
+    return {
+        "pin_set": db.get_setting(phone.PIN_SETTING) is not None,
+        "token_set": db.get_setting(phone.TOKEN_SETTING) is not None,
+        "pin_min_length": config.PHONE_PIN_MIN_LENGTH,
+        "max_length": config.MAX_MESSAGE_LENGTH,
+        "presets": [dict(p) for p in db.list_presets()],
+    }
+
+
+def _digit(digit: int) -> int:
+    if not 1 <= digit <= 9:
+        raise HTTPException(status_code=400, detail="Presets use the keys 1 to 9")
+    return digit
+
+
+@router.put("/api/admin/phone/presets/{digit}")
+async def set_preset(digit: int, body: PresetIn, request: Request,
+                     ctx: Ctx = Depends(require_recent_auth)):
+    text = clean_text(body.text)
+    if not text:
+        raise HTTPException(status_code=400, detail="Preset text is empty")
+    if len(text) > config.MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Use at most {config.MAX_MESSAGE_LENGTH} characters")
+    db.set_preset(_digit(digit), text)
+    _audit(request, ctx, "preset_saved", f"preset {digit}", text[:80])
+    return {"digit": digit, "body": text}
+
+
+@router.delete("/api/admin/phone/presets/{digit}")
+async def delete_preset(digit: int, request: Request, ctx: Ctx = Depends(require_recent_auth)):
+    if not db.delete_preset(_digit(digit)):
+        raise HTTPException(status_code=404, detail="No preset on that key")
+    _audit(request, ctx, "preset_deleted", f"preset {digit}")
+    return {"ok": True}
+
+
+@router.put("/api/admin/phone/pin")
+async def set_phone_pin(body: PinIn, request: Request, ctx: Ctx = Depends(require_recent_auth)):
+    pin = body.pin.strip()
+    if not phone.valid_pin(pin):
+        raise HTTPException(status_code=400, detail=phone.pin_rules())
+    db.set_setting(phone.PIN_SETTING, hash_password(pin))
+    _audit(request, ctx, "phone_pin_changed", None)
+    return {"ok": True}
+
+
+@router.delete("/api/admin/phone/pin")
+async def remove_phone_pin(request: Request, ctx: Ctx = Depends(require_recent_auth)):
+    db.set_setting(phone.PIN_SETTING, None)
+    _audit(request, ctx, "phone_pin_removed", None, "phone paging disabled")
+    return {"ok": True}

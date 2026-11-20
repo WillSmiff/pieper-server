@@ -20,6 +20,9 @@ piepertje.nl {
 		-Server
 	}
 
+	# Internal endpoints (the phone line) are only for services on this machine.
+	respond /internal/* 404
+
 	reverse_proxy 127.0.0.1:8000
 }
 

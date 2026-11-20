@@ -18,6 +18,10 @@ create the first admin, or to get back in when no admin can sign in.
                                                # a connection that uses the old token)
     python manage.py del-device pager-01
     python manage.py devices
+    python manage.py phone-token               # new token for Asterisk (printed on stdout only)
+    python manage.py phone-pin                 # set the PIN callers enter (prompts)
+    python manage.py phone-off                 # remove the PIN: phone paging is disabled
+    python manage.py phone-status              # PIN/token set? which presets?
 
 On the VPS, always run it as the pager user with PAGER_DATA_DIR=/var/lib/pager.
 """
@@ -27,8 +31,8 @@ import getpass
 import sqlite3
 import sys
 
-from pager_server import config, db
-from pager_server.security import valid_name
+from pager_server import config, db, phone
+from pager_server.security import hash_password, hash_token, new_device_token, valid_name
 
 
 def ask_password() -> str:
@@ -72,6 +76,8 @@ def main() -> int:
     for cmd in ("add-device", "rotate-device", "del-device"):
         sub.add_parser(cmd).add_argument("name")
     sub.add_parser("devices")
+    for cmd in ("phone-token", "phone-pin", "phone-off", "phone-status"):
+        sub.add_parser(cmd)
     args = p.parse_args()
 
     print(f"Database: {config.DB_PATH}  (set PAGER_DATA_DIR to change)", file=sys.stderr)
@@ -171,6 +177,36 @@ def main() -> int:
     elif args.cmd == "devices":
         for d in db.list_devices():
             print(f"{d['name']:<24} last seen {d['last_seen'] or 'never'}")
+    elif args.cmd == "phone-token":
+        token = new_device_token()
+        db.set_setting(phone.TOKEN_SETTING, hash_token(token))
+        audit("phone_token_rotated", None)
+        print("New phone service token; the previous one no longer works. Put it in "
+              "/etc/asterisk/pager-token (see README).", file=sys.stderr)
+        print(token)  # alone on stdout, so it can be piped into the file
+    elif args.cmd == "phone-pin":
+        while True:
+            pin = getpass.getpass("Phone PIN (digits): ").strip()
+            if not phone.valid_pin(pin):
+                print(phone.pin_rules())
+            elif pin != getpass.getpass("Repeat PIN: ").strip():
+                print("PINs do not match.")
+            else:
+                break
+        db.set_setting(phone.PIN_SETTING, hash_password(pin))
+        audit("phone_pin_changed", None)
+        print("Phone PIN set.")
+    elif args.cmd == "phone-off":
+        db.set_setting(phone.PIN_SETTING, None)
+        audit("phone_pin_removed", None, "phone paging disabled")
+        print("Phone PIN removed; calls can no longer send pages.")
+    elif args.cmd == "phone-status":
+        print(f"PIN:   {'set' if db.get_setting(phone.PIN_SETTING) else 'not set (phone paging off)'}")
+        print(f"Token: {'set' if db.get_setting(phone.TOKEN_SETTING) else 'not set (run phone-token)'}")
+        presets = db.list_presets()
+        print("Presets:" if presets else "Presets: none (add them on the admin page)")
+        for pr in presets:
+            print(f"  {pr['digit']}  {pr['body']}")
     return 0
 
 

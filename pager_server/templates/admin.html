@@ -40,6 +40,41 @@
     </section>
 
     <section class="card">
+      <div class="section-head">
+        <h2>Phone line</h2>
+        <span id="phone-state" class="muted small"></span>
+      </div>
+      <p class="muted small">Callers enter the phone PIN, then press a key from 1 to 9 to send that
+        preset page to all pagers. Pages arrive as sent by "phone line".</p>
+      <div class="table-wrap">
+        <table id="presets">
+          <thead><tr><th>Key</th><th>Page text</th><th></th></tr></thead>
+          <tbody><tr><td colspan="3" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <form id="add-preset" class="inline-form">
+        <label class="key">Key
+          <select name="digit">
+            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+            <option>6</option><option>7</option><option>8</option><option>9</option>
+          </select>
+        </label>
+        <label>Page text
+          <input name="text" required maxlength="200" placeholder="e.g. Everyone to the main hall">
+        </label>
+        <button type="submit">Save preset</button>
+      </form>
+      <form id="phone-pin" class="inline-form">
+        <label>Phone PIN
+          <input name="pin" type="password" inputmode="numeric" autocomplete="new-password"
+                 required pattern="[0-9]{6,12}" maxlength="12" placeholder="6-12 digits">
+        </label>
+        <button type="submit" class="secondary">Set PIN</button>
+        <button type="button" id="phone-off" class="danger">Turn off phone paging</button>
+      </form>
+    </section>
+
+    <section class="card">
       <h2>Audit log</h2>
       <div class="table-wrap scroll">
         <table id="audit">
