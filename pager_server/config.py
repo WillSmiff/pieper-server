@@ -11,7 +11,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "pager.db"
 
-# Max characters per page. The T-Display S3 screen is 320x170, so keep it short.
+# Max characters per page. Should be kept short for small screens.
 MAX_MESSAGE_LENGTH = int(os.environ.get("PAGER_MAX_MESSAGE_LENGTH", "200"))
 
 # Set to 1 when the site is served over HTTPS (recommended), so the session
@@ -41,7 +41,7 @@ LOGIN_WINDOW_SECONDS = int(os.environ.get("PAGER_LOGIN_WINDOW_SECONDS", "900"))
 # Pages older than this are deleted (0 = keep forever).
 RETENTION_DAYS = int(os.environ.get("PAGER_RETENTION_DAYS", "90"))
 
-# Drawings: 1 bit per pixel, sized for the T-Display S3 screen (landscape).
+# Drawings: 1 bit per pixel, sized for a small landscape screen.
 # Rows are packed MSB-first and padded to whole bytes (the Adafruit-GFX /
 # TFT_eSPI drawBitmap format), so a device can draw one with a single call.
 DRAWING_WIDTH = 320

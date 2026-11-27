@@ -1,13 +1,14 @@
-# Pager server
-
+# Pieper - Pager server
+<p align="center">
+  <img src="assets/img/logo.svg" alt="a pager displaying a pieper"/>
+</p>
 A small pager service: users sign in to a website, type a message, and it is
-sent to every connected pager device (LilyGo T-Display S3) over a WebSocket.
+sent to every connected pager device over a WebSocket.
 
 - **Web UI**: username/password login, a compose box with a character counter, live device
   online/offline status, and recent pages with how many devices received each one.
 - **Drawings**: the **Drawing** tab has a 320×170 black-and-white drawing pad (pen, eraser, brush
-  sizes, undo), the size of the T-Display S3 screen. A drawing is sent as a 1-bit bitmap, with an
-  optional caption.
+  sizes, undo). A drawing is sent as a 1-bit bitmap, with an optional caption.
 - **Devices**: each pager has its own secret token and holds one WebSocket connection to the
   server. Pages are pushed to it right away. If a device was offline, it catches up with `sync`.
 - **Storage**: SQLite in `data/`. Passwords are hashed with scrypt, and device tokens and login
@@ -235,7 +236,7 @@ For a drawing, `text` is the caption and may be empty.
 **Drawings** are 1 bit per pixel, 320×170, rows top to bottom. Each row is packed most significant
 bit first (the leftmost pixel is bit 7 of the first byte) and padded to whole bytes (40 bytes per
 row). A set bit is ink. This is exactly the format of Adafruit-GFX / TFT_eSPI `drawBitmap`, so on
-the T-Display S3 (landscape, `setRotation(1)`), after base64-decoding `image.data`:
+the T-Display S3 used for prototyping (landscape, `setRotation(1)`), after base64-decoding `image.data`:
 
 ```cpp
 tft.fillScreen(TFT_WHITE);
